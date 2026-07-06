@@ -1,0 +1,6 @@
+.DS_Store
+.idea/
+.gocache/
+/bin/
+/logs/
+/config.yaml

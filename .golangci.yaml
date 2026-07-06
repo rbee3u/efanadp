@@ -1,0 +1,115 @@
+version: "2"
+
+run:
+  tests: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  default: none
+  enable:
+    - asasalint
+    - bidichk
+    - bodyclose
+    - canonicalheader
+    - containedctx
+    - contextcheck
+    - copyloopvar
+    - depguard
+    - durationcheck
+    - errcheck
+    - errchkjson
+    - errorlint
+    - exhaustive
+    - fatcontext
+    - forcetypeassert
+    - gocheckcompilerdirectives
+    - gochecksumtype
+    - gocritic
+    - gomoddirectives
+    - gosec
+    - govet
+    - ineffassign
+    - iotamixing
+    - loggercheck
+    - makezero
+    - mirror
+    - musttag
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - noctx
+    - nolintlint
+    - nosprintfhostport
+    - predeclared
+    - reassign
+    - recvcheck
+    - staticcheck
+    - thelper
+    - unconvert
+    - unparam
+    - unused
+    - usetesting
+    - wastedassign
+  exclusions:
+    warn-unused: true
+    rules:
+      - path: _test\.go
+        text: "G304: Potential file inclusion via variable"
+        linters:
+          - gosec
+      - path: internal/(app/config_reference|config/config|tui/settings)\.go
+        source: "^\\s*data, err := os\\.ReadFile\\((input|path)\\)"
+        text: "G304: Potential file inclusion via variable"
+        linters:
+          - gosec
+      - path: internal/app/config_reference\.go
+        source: "^\\s*return os\\.WriteFile\\("
+        text: "G703: Path traversal via taint analysis"
+        linters:
+          - gosec
+      - path: internal/x365/ss_sniff_cipher\.go
+        text: "G401|G501|G505"
+        linters:
+          - gosec
+      - path: internal/x365/transport\.go
+        source: "^\\s*resp, err := transport\\.RoundTrip\\(req\\)"
+        text: "response body must be closed and consumed"
+        linters:
+          - bodyclose
+  settings:
+    bodyclose:
+      check-consumption: true
+    copyloopvar:
+      check-alias: true
+    depguard:
+      rules:
+        no-risky-imports:
+          deny:
+            - pkg: os/exec$
+              desc: use in-process APIs instead of spawning commands
+            - pkg: math/rand$
+              desc: use crypto/rand for security-sensitive randomness
+    errcheck:
+      check-type-assertions: true
+    exhaustive:
+      default-signifies-exhaustive: false
+    govet:
+      enable:
+        - atomicalign
+        - deepequalerrors
+        - nilness
+        - reflectvaluecompare
+        - sortslice
+        - unusedwrite
+    gocritic:
+      enabled-tags:
+        - diagnostic
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    staticcheck:
+      checks:
+        - SA*

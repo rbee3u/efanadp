@@ -1,0 +1,67 @@
+# efanadp reference configuration.
+# Copy this file to config.yaml before first use. Keep config.yaml private.
+# Replace proxies_uuid with your X365 account UUID; leave proxies_tmpl unchanged
+# unless you regenerate this file from a decrypted private config.
+
+# listen is the local SOCKS5 TCP listen address for mihomo or direct tests.
+# Change the port only if 10865 is already in use or your mihomo rule points
+# at a different local port.
+listen: 127.0.0.1:10865
+
+# log controls runtime logging. Use level debug only while troubleshooting.
+# output accepts stdout, stderr, or a local file path. File outputs rotate.
+# format accepts text for humans or json for structured log collectors.
+log:
+  level: info
+  output: logs/app.log
+  format: text
+
+# sniff enables optional display-only target sniffing when efanadp first
+# connects to a Shadowsocks landing server before the real target. Leave this
+# block commented out unless your route has that first hop.
+#
+# shadowsocks entries are matched by server and port. method is the cipher
+# name used by the landing server, and password is that Shadowsocks password.
+# sniffing affects logs and TUI target labels only; relay behavior is unchanged.
+# sniff:
+#   shadowsocks:
+#     - name: landing
+#       server: 203.0.113.10
+#       port: 39281
+#       method: aes-256-gcm
+#       password: <shadowsocks-password>
+
+# proxies_uuid is your X365 account UUID. It is inserted into every URL in
+# proxies_tmpl at startup. Replace the placeholder with the UUID from your
+# decrypted private config, and do not commit the filled config.yaml.
+proxies_uuid: <your-x365-uuid>
+
+# proxies_tmpl is zlib-compressed, base64-encoded YAML containing x365://
+# node URL templates with the UUID userinfo removed as x365://@server...
+# Treat it as packaging, not redaction: unpacked templates can still contain
+# provider hosts, paths, REALITY public keys, and short IDs. Do not edit this
+# block by hand; regenerate config.reference.yaml from a private config when
+# the node set changes.
+proxies_tmpl: |
+  eJzEnE1vG0Ucxu/9FJxya+JZ74s3UgTihHopKgfE0S+bXe8m9sazq9CeQEqkkqiESlVDaEJSqFus
+  GmoU1EDVxF+m45dvgZwZeQu3p4fH16qHnx7NzG+e/47zbrgzvjwcPX5VEqs3bn70ddl1VldWPqmF
+  aUksN1oyWK+2SnbFEcv19uaqbZc/TqtZtLbSyStiKWrLbK2x0Wh2xPLW1ux/LMlW83//ktaStfhm
+  69OyV7esW+2v2tv3vqjdyepB0Lrjtrb8W20Z3P48/PL2Z+tC3GsvyWZjre7Va77tN0qeW/cDv3yj
+  wLRQTIuKeaL2ztT93rs3P4GB1kJhe4tCxUKdoVaIqGrvbLQ/VM9egJHWq56/EEwsznq1UmJiPhio
+  N8/V4O2kO8SXabPhlRcIiyXbbHg2E/ZgMPrnCgw02y4zD1LDiOWYbZeZp6hhLKOM1IWpGW2UcQHr
+  0UEZHT6jizK6fEYPZWTq3DBWUEaqxzWjjzJSJX7NKEogo001+PHp5JtztfsaVU1HCKpr5pygbjpC
+  UH3T7arjgbrfA/OsZoLrnDknlueMk+qdi78m3SHafzo+dW1qRrD4dHzqury6UE8uwRwbQYXqb82I
+  5dgIKkx/j3YO1LMX+P5uZj4zygITbDmZT03z8UDtnamTp2CaMrSYG7zAxNKUocXc4wUmVndkaDHV
+  U2BijUeGFtM8BSZWemRoUXf6HBPrPTK0FrPTseojQ4tZfQpMrP3I0GK2nwITK0AytJgFaI4JdiAZ
+  lpkdaHTYHR33QQXFqU1VkGbE/BOnNtU/mhGTT5zaVPloRsw8cWpTzaMZMe3EqU3VjmbEnBOnNtU5
+  mhETTpxSP50ZRsw2cUr9ZmYYMdXEqU1VzTUj6Jk4daieOe2r00fq1W+gapLIpR6Rc0zMNknkUk/J
+  81/U7gCMMt0QgrosNSQWZLohLOq6PB/gs6Escqm+0Yzg8Ddyqb65OtdDF/xTeDX3qNZ5nxQcAOce
+  0z3jhz+rX1+ijzUiQe05BhJ8qhEJassZv9yfHr1WfzwBw9zIBHU8VHBiec44mf4ZXx5Oe301eIvv
+  9k5bUD+M/wcVfPTWFtTv4+Or73EX5dJhdnHDiAWZS4fZxQ0j1sVz6VB3umbEunguHeou14xYF8+l
+  Q93emhHr4rl0FrCvsS6eS4d5KzKMWBfPpUO9D2lGrIvn0qFeh64ZwS6eS5d5G5rs9fH2uN70meej
+  YcQ8s970mefjZP9P3NdhzWOej4YRyzGseczzcfLgAl+PrQ0hmAekgcSCnEEyT8jJw6eTH3bG3x2h
+  o6FMlKhhzjnB6VAmStQ8u8Pxwe94noEUJaZ1Ck4sz0AKwTTP9Mfh5NtH0919dEQUuMw4C0xwPhR4
+  1DRPe7h/ko7L7IuGEZymd1xmX5w+Pxr9jf5wL0qoMWpELMYoWUCKWOuOEual0iBipTtKmHdKg4h1
+  7ihhXikNIla5o4R5ozSIWOOOEuYVyCBihTtKmLcfg4j17SihmvoaEazbUcK99GhGWC98vwjUL9Sf
+  lxhGVDCCbxiBGkbwFSNQxQi+YwTqGMGXjEAlQ51aGEbUMtShhWFENUN9y6IZLdQz1Kcs015/dNL9
+  oL9GsHnXpa7K90kx52zedZlr898AAAD//wWKgms=
