@@ -23,8 +23,8 @@ private config, node URLs, provider domains, and logs. See
 Use `socks5h://`, not `socks5://`, when testing the adapter directly:
 
 ```bash
-curl -x socks5h://127.0.0.1:10865 https://ifconfig.me/ip
-curl -x socks5h://127.0.0.1:10865 https://api.ipify.org
+curl --fail --silent --show-error --proxy "socks5h://127.0.0.1:10865" "https://ifconfig.me/ip"
+curl --fail --silent --show-error --proxy "socks5h://127.0.0.1:10865" "https://api.ipify.org"
 ```
 
 `socks5://` resolves the domain locally first. With mihomo fake-ip enabled, that

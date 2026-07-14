@@ -92,23 +92,19 @@ See [configuration](docs/configuration.md) for the full config reference.
 
 ## Useful Commands
 
-| Command | Use |
-| --- | --- |
-| `make help` | List available targets. |
-| `make run` | Run the interactive TUI; pass `ARGS="--config proxy.yaml"` for a one-off config path. |
-| `make build` | Build `./bin/efanadp`. |
-| `make test` | Run Go tests with the in-repo `.gocache`. |
-| `make race` | Run Go tests with race detection. |
-| `make lint` | Run configured `golangci-lint` checks. |
-| `make style` | Check `goimports` and `gofumpt` style without rewriting files. |
-| `make format` | Apply `goimports` and `gofumpt` formatting. |
-| `make curl` | Smoke-test egress through `socks5h://127.0.0.1:10865`. |
-| `make config-reference` | Regenerate `config.reference.yaml` from private `config.yaml`; pass `ARGS="--in ... --out ..."` for explicit paths. |
-| `make deps` | Install pinned formatting and linting tools into `.gocache/bin`. |
+`make help` is the authoritative target list. Common shortcuts:
 
-`make curl` requires a running local SOCKS5 listener and external network
-access. `make config-reference` reads private input. `make deps` may need network
-access.
+```bash
+make run ARGS="--config proxy.yaml"
+make build
+make test
+make lint
+make config-reference
+```
+
+`make config-reference` reads private input. `make deps` installs pinned
+formatting and linting tools with the host Go toolchain, may need network
+access, and writes to the host Go bin directory.
 
 ## Documentation
 

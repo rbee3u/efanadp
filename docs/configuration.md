@@ -4,7 +4,11 @@
 reverse workflow and should not be committed, pasted into docs, or used as the
 basis for examples. See [`privacy.md`](privacy.md) for sanitization rules.
 
-## Full Config Shape
+## Plain Config Example
+
+This is the decrypted config shape. The committed `config.reference.yaml`
+template uses `proxies_tmpl` and `proxies_uuid` instead; see
+[Committed Template Format](#committed-template-format).
 
 ```yaml
 listen: 127.0.0.1:10865
@@ -24,7 +28,7 @@ proxies:
     - x365://<your-x365-uuid>@203.0.113.10:443?path=/node&host=example.org&sni=example.org&pbk=<public-key>&sid=<short-id>
 ```
 
-Fields:
+Top-level fields:
 
 - `listen`: optional local SOCKS5 listen address. Defaults to
   `127.0.0.1:10865`.

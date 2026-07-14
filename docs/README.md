@@ -6,10 +6,7 @@ domains, captures, or live logs.
 
 ## Start Here
 
-The current split is intentionally small: private-material handling, normal
-operation, config reference, symptom triage, implementation architecture, and
-protocol findings each have a separate home. The canonical directory is
-`docs/`; this repository does not use `doc/`.
+The canonical directory is `docs/`; this repository does not use `doc/`.
 
 | Need | Read |
 | --- | --- |
@@ -22,18 +19,13 @@ protocol findings each have a separate home. The canonical directory is
 
 ## Maintenance Rules
 
-- Keep [README.md](../README.md) focused on first-run setup and links into
-  this directory.
-- Keep `docs/` as the single docs root unless a rename is deliberate; avoid
-  parallel `doc/` and `docs/` trees.
-- Update docs in the same change as user-facing behavior, config shape,
-  Makefile targets, relay behavior, or protocol findings.
-- Keep private-material rules centralized in [privacy.md](privacy.md), then link
-  to it from user-facing docs instead of repeating long warnings everywhere.
-- Put operational symptoms and resolver behavior in
-  [troubleshooting.md](troubleshooting.md), not in protocol notes.
-- Put reverse-engineered byte layouts and invariants in
-  [x365-protocol.md](x365-protocol.md), not in setup docs.
+- Keep [README.md](../README.md) focused on first-run setup and links here.
+- Keep `docs/` as the single docs root unless a rename is deliberate.
+- Update docs with user-facing behavior, config shape, Makefile targets, relay
+  behavior, or protocol findings.
+- Keep private-material rules in [privacy.md](privacy.md), operational symptoms
+  in [troubleshooting.md](troubleshooting.md), and byte-level protocol findings
+  in [x365-protocol.md](x365-protocol.md).
 - Treat `proxies_tmpl` as packaged template data, not safe text. Do not decode,
   decompress, or quote it during routine docs work.
 - Keep private runtime material out of all examples. Use `example.org`,

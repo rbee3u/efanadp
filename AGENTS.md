@@ -27,6 +27,8 @@ verified changes.
 
 ## Common Commands
 
+Prefer Make targets when one exists:
+
 ```bash
 make help
 make deps
@@ -37,61 +39,35 @@ make test
 make race
 make lint
 make run
-make curl
 make config-reference
 ```
 
-Go-backed targets use the in-repo `.gocache`; `go.mod` declares the required Go
-version. Prefer the Make targets for Go work. Do not run bare Go commands when a
-Make target exists, because the Makefile pins `GOCACHE` to `.gocache/build` and
-`GOMODCACHE` to `.gocache/mod`.
-Use `ARGS` for target arguments, such as:
+Go-backed targets use the host Go toolchain and host tool caches; `go.mod`
+declares the required Go version. Do not run bare Go commands when a Make target
+exists.
+
+Use `ARGS` for target arguments:
 
 ```bash
 make run ARGS="--config proxy.yaml"
 make config-reference ARGS="--in config.yaml --out config.reference.yaml"
 ```
 
-When a direct Go command is unavoidable, set both caches explicitly. Setting
-only `GOCACHE` is not enough, because module downloads and locks otherwise go to
-the user-level module cache.
-
-```bash
-GOCACHE="$(pwd)/.gocache/build" GOMODCACHE="$(pwd)/.gocache/mod" go get ...
-GOCACHE="$(pwd)/.gocache/build" GOMODCACHE="$(pwd)/.gocache/mod" go mod tidy
-GOCACHE="$(pwd)/.gocache/build" GOMODCACHE="$(pwd)/.gocache/mod" go test ./...
-GOCACHE="$(pwd)/.gocache/build" GOMODCACHE="$(pwd)/.gocache/mod" go build ./...
-GOCACHE="$(pwd)/.gocache/build" GOMODCACHE="$(pwd)/.gocache/mod" go run ./cmd/efanadp
-GOCACHE="$(pwd)/.gocache/build" GOMODCACHE="$(pwd)/.gocache/mod" go list ./...
-GOCACHE="$(pwd)/.gocache/build" GOMODCACHE="$(pwd)/.gocache/mod" go install ...
-```
-
-When running `golangci-lint` directly instead of `make lint`, also use the
-in-repo lint cache:
-
-```bash
-GOCACHE="$(pwd)/.gocache/build" GOMODCACHE="$(pwd)/.gocache/mod" GOLANGCI_LINT_CACHE="$(pwd)/.gocache/lint" ./.gocache/bin/golangci-lint run
-```
-
-If a Go command still fails after using the in-repo caches, request escalation
-only for network downloads, proxy access, or other external resources; do not
-request escalation merely to write Go build, module, or lint caches.
-
 - Run `make deps` only when formatting or linting tools are missing or the user
-  asks, because it installs pinned tools into `.gocache/bin` and may need
-  network access.
+  asks, because it installs pinned tools with the host Go toolchain and may need
+  network access. Ensure the host Go bin directory is on `PATH`.
 - Use `make style` for non-mutating formatting checks, `make format` to rewrite
   formatting, `make race` for race detection, and `make lint` for configured
   `golangci-lint` checks.
 - `make run` starts the interactive TUI; do not use it for routine validation.
-- `make curl` requires the local SOCKS5 proxy and external network access; use
-  it only when live runtime verification is needed.
+- Use direct `go ...` or `golangci-lint run` only when no Make target covers the
+  task; use the host toolchain and binaries from `PATH`.
 
 Manual UDP probing is guarded by the `manual` build tag, uses private config,
 and may touch the network. Run it only when explicitly asked:
 
 ```bash
-GOCACHE="$(pwd)/.gocache/build" GOMODCACHE="$(pwd)/.gocache/mod" EFANADP_CONFIG=config.yaml EFANADP_NODE_INDEX=0 go test -tags manual ./internal/x365 -run TestManualX365UDPProbe
+EFANADP_CONFIG=config.yaml EFANADP_NODE_INDEX=0 go test -tags manual ./internal/x365 -run TestManualX365UDPProbe
 ```
 
 ## Validation
@@ -137,25 +113,21 @@ GOCACHE="$(pwd)/.gocache/build" GOMODCACHE="$(pwd)/.gocache/mod" EFANADP_CONFIG=
 
 - Update docs in the same change as user-facing behavior, config shape, protocol
   behavior, or Makefile targets.
-- Update `README.md` only for the shortest onboarding path.
-- Treat `docs/` as the canonical docs directory. If a prompt says `doc/`, check
-  whether it means `docs/`; do not create a second docs tree unless explicitly
+- Keep `README.md` to the shortest onboarding path and links into `docs/`.
+- Treat `docs/` as the canonical docs root. If a prompt says `doc/`, check
+  whether it means `docs/`; do not create a parallel tree unless explicitly
   asked to rename.
-- Update `docs/README.md` when the documentation index or document set changes.
-- Update `docs/privacy.md` when private-material handling, sanitization rules,
-  template safety, or sharing guidance changes.
-- Update `docs/setup.md` for operation, mihomo rules, TUI controls, logs, and
-  smoke tests.
-- Update `docs/troubleshooting.md` for curl, fake-IP, browser DNS/DoH, loop,
-  QUIC, UDP/443, and config-load troubleshooting.
-- Update `docs/configuration.md` when `config.yaml`, `config.reference.yaml`, or
-  `sniff.shadowsocks` changes.
-- Update `docs/architecture.md` when package responsibilities, TUI lifecycle, or
-  relay behavior changes.
-- Update `docs/x365-protocol.md` when reverse findings change protocol bytes,
-  frame layouts, request headers, or invariants.
-- Update `AGENTS.md` when safety rules, validation flow, or Makefile targets
-  change.
+
+| File | Update when |
+| --- | --- |
+| `docs/README.md` | the documentation index or split changes |
+| `docs/privacy.md` | private-material handling, sanitization, template safety, or sharing guidance changes |
+| `docs/setup.md` | operation, mihomo rules, TUI controls, logs, or smoke tests change |
+| `docs/troubleshooting.md` | curl, fake-IP, browser DNS/DoH, loop, QUIC, UDP/443, or config-load troubleshooting changes |
+| `docs/configuration.md` | `config.yaml`, `config.reference.yaml`, or `sniff.shadowsocks` changes |
+| `docs/architecture.md` | package responsibilities, TUI lifecycle, or relay behavior changes |
+| `docs/x365-protocol.md` | reverse findings change protocol bytes, frame layouts, request headers, or invariants |
+| `AGENTS.md` | safety rules, validation flow, or Makefile targets change |
 
 ## Implementation Notes
 

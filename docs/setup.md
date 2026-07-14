@@ -170,12 +170,12 @@ browser process name. Check mihomo's own connection panel for that.
 After the TUI shows a running service, test direct SOCKS egress with:
 
 ```bash
-make curl
+curl --fail --silent --show-error --proxy "socks5h://127.0.0.1:10865" "https://ifconfig.me/ip"
 ```
 
-`make curl` uses the default listener and external network access. For manual
-checks, use `socks5h://127.0.0.1:10865`; `socks5://` resolves the domain
-locally first and can turn the target into a mihomo fake IP.
+The command uses the default listener and external network access. Use
+`socks5h://127.0.0.1:10865`; `socks5://` resolves the domain locally first and
+can turn the target into a mihomo fake IP.
 
 See [`troubleshooting.md`](troubleshooting.md) when curl hangs, a browser
 behaves differently from curl, or mihomo shows fake-IP, QUIC, or UDP/443 traffic

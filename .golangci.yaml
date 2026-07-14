@@ -11,6 +11,7 @@ linters:
   default: none
   enable:
     - asasalint
+    - asciicheck
     - bidichk
     - bodyclose
     - canonicalheader
