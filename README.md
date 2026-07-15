@@ -39,10 +39,11 @@ See [setup](docs/setup.md) for the full operating guide.
 
 ## Runtime Privacy
 
-Keep `config.yaml`, private node URLs, account UUIDs, REALITY material, provider
-domains, captures, and live logs out of git and out of docs. Use sanitized
-placeholders such as `example.org`, `example.net`, `203.0.113.10`, and
-`<your-x365-uuid>`; do not derive examples by editing private values.
+Keep `config.yaml`, `settings.json`, private node URLs, account UUIDs, REALITY
+material, provider domains, captures, and live logs out of git and out of docs.
+Use sanitized placeholders such as `example.org`, `example.net`,
+`203.0.113.10`, and `<your-x365-uuid>`; do not derive examples by editing
+private values.
 
 `config.reference.yaml` removes only account UUID userinfo from URL templates,
 but compression and base64 are packaging, not redaction. Review regenerated
@@ -110,7 +111,7 @@ access, and writes to the host Go bin directory.
 
 Start with [docs/README.md](docs/README.md). Frequent jumps:
 [privacy](docs/privacy.md), [setup](docs/setup.md),
-[troubleshooting](docs/troubleshooting.md),
+[logging](docs/logging.md), [troubleshooting](docs/troubleshooting.md),
 [configuration](docs/configuration.md), and
 [X365 protocol notes](docs/x365-protocol.md).
 

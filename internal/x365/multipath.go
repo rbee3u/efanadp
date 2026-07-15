@@ -166,13 +166,19 @@ func (c *multipathConn) readDataFramePayload(seq uint64, payloadLen int, dst []b
 		return payloadLen, nil
 	}
 
-	payload := make([]byte, payloadLen)
-	if _, err := io.ReadFull(c.stream, payload); err != nil {
+	directLen := len(dst)
+	if directLen > 0 {
+		if _, err := io.ReadFull(c.stream, dst); err != nil {
+			return 0, err
+		}
+	}
+	remainder := make([]byte, payloadLen-directLen)
+	if _, err := io.ReadFull(c.stream, remainder); err != nil {
 		return 0, err
 	}
 	c.ackDataFrame(seq + framePayloadLenUint64(payloadLen))
-	c.readBuf = payload
-	return c.readBuffered(dst), nil
+	c.readBuf = remainder
+	return directLen, nil
 }
 
 func (c *multipathConn) ackDataFrame(seq uint64) {

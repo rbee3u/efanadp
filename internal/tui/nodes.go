@@ -155,8 +155,8 @@ func (m *Model) updateRunning(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) prepareNodeSelection() {
 	m.nodeList = newNodeList(nodeItemsWithCurrent(m.nodes, m.currentNodeName()))
 	m.resizeNodeList()
-	if m.currentNode != nil {
-		if _, ok := m.selectNodeByName(m.currentNode.Name); ok {
+	if currentName := m.currentNodeName(); currentName != "" {
+		if _, ok := m.selectNodeByName(currentName); ok {
 			return
 		}
 	}

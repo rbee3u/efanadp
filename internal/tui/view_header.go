@@ -22,7 +22,7 @@ func (m *Model) runningListen() string {
 	if m.service != nil && m.service.listen != "" {
 		return m.service.listen
 	}
-	return m.config.listen
+	return m.config.loaded.Listen
 }
 
 func (m *Model) runningSummary() string {
@@ -31,11 +31,11 @@ func (m *Model) runningSummary() string {
 	}
 	var b strings.Builder
 	b.WriteString(m.runningStatus())
-	if m.currentNode != nil {
+	if node := m.currentNode(); node != nil {
 		b.WriteString("\n\n")
-		b.WriteString(m.currentNode.Name)
+		b.WriteString(node.Name)
 		b.WriteString("\n")
-		b.WriteString(m.currentNode.ServerSummary())
+		b.WriteString(node.ServerSummary())
 	}
 	return b.String()
 }
@@ -46,9 +46,9 @@ func (m *Model) compactRunningSummary() string {
 	}
 	var b strings.Builder
 	b.WriteString(m.runningStatus())
-	if m.currentNode != nil {
+	if node := m.currentNode(); node != nil {
 		b.WriteString("\n\n")
-		b.WriteString(m.currentNode.Name)
+		b.WriteString(node.Name)
 	}
 	return b.String()
 }

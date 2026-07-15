@@ -31,8 +31,8 @@ func TestStartNodeTransitionsAndStops(t *testing.T) {
 	if model.service == nil {
 		t.Fatal("expected service")
 	}
-	if model.currentNode == nil || model.currentNode.Name != "test-node" {
-		t.Fatalf("bad current node: %+v", model.currentNode)
+	if model.service.node.Name != "test-node" {
+		t.Fatalf("service node=%+v, want test-node", model.service.node)
 	}
 
 	model.stopService()
@@ -98,7 +98,7 @@ func TestStartNodeLeavesConnectionEventsOpenAfterStop(t *testing.T) {
 
 func TestServerConfigPassesShadowsocksSniffConfigs(t *testing.T) {
 	model := newTestModel(Options{})
-	model.config.sniffConfigs = []x365.ShadowsocksSniffConfig{{
+	model.config.loaded.ShadowsocksSniffConfigs = []x365.ShadowsocksSniffConfig{{
 		Name:     "landing",
 		Server:   "203.0.113.10",
 		Port:     39281,
@@ -123,38 +123,33 @@ func TestLoadNodesRestoresAndStartsRememberedNode(t *testing.T) {
 	settingsPath := filepath.Join(t.TempDir(), "settings.json")
 	runtime := newRuntimeConfig(Options{
 		ConfigPath:       "proxy.yaml",
-		SettingsPath:     settingsPath,
 		Timeout:          time.Second,
 		HandshakeTimeout: time.Second,
 	})
-	applyLoadedRuntimeConfig(&runtime, config.Config{Listen: "127.0.0.1:0"})
+	runtime.settingsPath = settingsPath
+	runtime.loaded = config.Config{Listen: "127.0.0.1:0", Nodes: []x365.Node{testNode()}}
 	model := newModel(startupConfig{
 		runtime: runtime,
-		loaded:  config.Config{Listen: "127.0.0.1:0", Nodes: []x365.Node{testNode()}},
 		settings: appSettings{
 			ConfigPath: "proxy.yaml",
 			NodeName:   "test-node",
 		},
-		loadedSettings: true,
 	}, modelDeps{serveSOCKS: fakeServeSOCKS})
 
 	cmd := model.Init()
 	if model.state != stateRunning {
 		t.Fatalf("state=%v, want running", model.state)
 	}
-	if model.currentNode == nil || model.currentNode.Name != "test-node" {
-		t.Fatalf("current node=%+v, want test-node", model.currentNode)
+	if model.service.node.Name != "test-node" {
+		t.Fatalf("service node=%+v, want test-node", model.service.node)
 	}
 	if cmd == nil {
 		t.Fatal("expected service command")
 	}
 
-	saved, ok, err := loadSettings(settingsPath)
+	saved, err := loadSettings(settingsPath)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !ok {
-		t.Fatal("expected settings to be saved")
 	}
 	if saved.ConfigPath != "proxy.yaml" || saved.NodeName != "test-node" {
 		t.Fatalf("saved settings=%+v, want config and node", saved)
@@ -227,9 +222,6 @@ func TestQuitWaitsForRunningServiceToStop(t *testing.T) {
 	if model.service != nil {
 		t.Fatal("service still set after stop during quit")
 	}
-	if model.currentNode != nil {
-		t.Fatal("current node still set after stop during quit")
-	}
 	requireQuitCommand(t, quitCmd)
 }
 
@@ -262,9 +254,6 @@ func TestQuitDiscardsPendingNodeSwitch(t *testing.T) {
 	model = requireModel(t, updated)
 	if model.service != nil {
 		t.Fatal("service restarted from discarded pending node switch")
-	}
-	if model.currentNode != nil {
-		t.Fatal("current node still set after discarded pending node switch")
 	}
 	requireQuitCommand(t, quitCmd)
 }

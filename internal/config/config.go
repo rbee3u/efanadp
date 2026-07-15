@@ -19,15 +19,9 @@ type Config struct {
 }
 
 type LogConfig struct {
-	Level  string `yaml:"level"`
-	Format string `yaml:"format"`
-	Output string `yaml:"output"`
-}
-
-type logFieldPresence struct {
-	level  bool
-	format bool
-	output bool
+	Level  string
+	Format string
+	Output string
 }
 
 const (
@@ -59,7 +53,7 @@ func Load(path string) (Config, error) {
 
 type rawConfig struct {
 	Listen      string        `yaml:"listen"`
-	Log         yaml.MapSlice `yaml:"log"`
+	Log         rawLogConfig  `yaml:"log"`
 	LogPath     *string       `yaml:"log_path"`
 	Proxies     yaml.MapSlice `yaml:"proxies"`
 	ProxiesTmpl string        `yaml:"proxies_tmpl"`

@@ -263,25 +263,3 @@ func decodePackedProxyTemplateForTest(t *testing.T, encoded string) []byte {
 	}
 	return data
 }
-
-func assertProxyTemplateLinesWrapped(t *testing.T, text string) {
-	t.Helper()
-
-	inTemplate := false
-	for line := range strings.SplitSeq(text, "\n") {
-		switch {
-		case line == "proxies_tmpl: |":
-			inTemplate = true
-		case inTemplate && strings.HasPrefix(line, "  "):
-			payload := strings.TrimPrefix(line, "  ")
-			if len(payload) > 76 {
-				t.Fatalf("proxies_tmpl line length=%d, want <=76", len(payload))
-			}
-		case inTemplate && strings.TrimSpace(line) != "":
-			t.Fatal("unexpected non-template line after proxies_tmpl")
-		}
-	}
-	if !inTemplate {
-		t.Fatal("missing proxies_tmpl block")
-	}
-}

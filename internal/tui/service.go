@@ -16,7 +16,7 @@ type serveSOCKSFunc func(context.Context, string, proxy.Config) error
 type runningService struct {
 	id               int
 	cancel           context.CancelFunc
-	nodeName         string
+	node             x365.Node
 	listen           string
 	connectionEvents chan proxy.Event
 	eventsDone       <-chan struct{}
@@ -54,21 +54,21 @@ func (m *Model) startService(start pendingStart) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	id := m.nextServiceID
 	m.nextServiceID++
-	listen := m.config.listen
+	listen := m.config.loaded.Listen
 	done := make(chan serviceStoppedMsg, 1)
 	events := make(chan proxy.Event, 128)
 	stopped := make(chan struct{})
 	service := &runningService{
 		id:               id,
 		cancel:           cancel,
-		nodeName:         start.node.Name,
+		node:             start.node,
 		listen:           listen,
 		connectionEvents: events,
 		eventsDone:       stopped,
 	}
 	cfg := m.serverConfig(start.node, start.userID, events)
 
-	m.setRunningService(service, start.node)
+	m.setRunningService(service)
 	m.logServiceStart(start.node, service.listen)
 	serveSOCKS := m.deps.serveSOCKS
 	go func() {
@@ -77,7 +77,7 @@ func (m *Model) startService(start pendingStart) tea.Cmd {
 		// close connectionEvents: connection handlers may emit after the listener
 		// stops, and serverConfig drops late events with a non-blocking send.
 		close(stopped)
-		done <- serviceStoppedMsg{id: service.id, nodeName: service.nodeName, err: err}
+		done <- serviceStoppedMsg{id: service.id, nodeName: service.node.Name, err: err}
 	}()
 
 	return tea.Batch(
@@ -92,7 +92,7 @@ func (m *Model) serverConfig(node x365.Node, userID x365.UserID, events chan<- p
 	return proxy.Config{
 		Upstream:                upstream,
 		HandshakeTimeout:        m.config.handshakeTimeout,
-		ShadowsocksSniffConfigs: m.config.sniffConfigs,
+		ShadowsocksSniffConfigs: m.config.loaded.ShadowsocksSniffConfigs,
 		Logger:                  m.deps.logger,
 		OnConnection: func(event proxy.Event) {
 			select {
@@ -103,10 +103,9 @@ func (m *Model) serverConfig(node x365.Node, userID x365.UserID, events chan<- p
 	}
 }
 
-func (m *Model) setRunningService(service *runningService, node x365.Node) {
+func (m *Model) setRunningService(service *runningService) {
 	m.service = service
-	m.setCurrentNode(node)
-	m.rememberedNodeName = node.Name
+	m.rememberedNodeName = service.node.Name
 	m.connections.reset(time.Now())
 	m.state = stateRunning
 	m.clearModeHint()
@@ -162,7 +161,6 @@ func (m *Model) clearStoppedService() *pendingStart {
 	pending := m.pendingStart
 	m.pendingStart = nil
 	m.service = nil
-	m.clearCurrentNode()
 	return pending
 }
 
@@ -170,7 +168,7 @@ func (m *Model) stopService() {
 	if m.service == nil {
 		return
 	}
-	m.logInfof("[efanadp] stopping node: %s", m.service.nodeName)
+	m.logInfof("[efanadp] stopping node: %s", m.service.node.Name)
 	m.service.cancel()
 }
 

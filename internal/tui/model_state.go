@@ -7,19 +7,18 @@ import (
 )
 
 func (m *Model) currentNodeName() string {
-	if m.currentNode == nil {
+	node := m.currentNode()
+	if node == nil {
 		return ""
 	}
-	return m.currentNode.Name
+	return node.Name
 }
 
-func (m *Model) setCurrentNode(node x365.Node) {
-	current := node
-	m.currentNode = &current
-}
-
-func (m *Model) clearCurrentNode() {
-	m.currentNode = nil
+func (m *Model) currentNode() *x365.Node {
+	if m.service == nil || m.service.node.Name == "" {
+		return nil
+	}
+	return &m.service.node
 }
 
 func (m *Model) resizeNodeList() {

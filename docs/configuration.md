@@ -116,7 +116,9 @@ make config-reference ARGS="--in config.yaml --out config.reference.yaml"
 
 `efanadp` loads one config file during startup. When `listen`, `log`, node URLs,
 or sniffing settings change, stop the process and start it again. Use `--config`
-/ `-c` to point a launch at a different YAML file.
+/ `-c` to point a launch at a different YAML file. Without `--config`, the TUI
+uses `configPath` from `settings.json` in the current working directory, then
+falls back to `config.yaml`.
 
 ## Logging
 
@@ -129,6 +131,7 @@ rotated at 100 MiB per file.
 `log.format` accepts `text` and `json`.
 
 The legacy `log_path` field is no longer accepted; use `log.output` instead.
+See [`logging.md`](logging.md) for output behavior and event examples.
 
 ## Shadowsocks Target Sniffing
 

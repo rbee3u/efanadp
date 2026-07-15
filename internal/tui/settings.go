@@ -13,33 +13,27 @@ type appSettings struct {
 	NodeName   string `json:"nodeName,omitempty"`
 }
 
-func DefaultSettingsPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
-		return filepath.Join(".efanadp", "settings.json")
-	}
-	return filepath.Join(home, ".efanadp", "settings.json")
-}
+const defaultSettingsPath = "settings.json"
 
-func loadSettings(path string) (appSettings, bool, error) {
+func loadSettings(path string) (appSettings, error) {
 	if strings.TrimSpace(path) == "" {
-		return appSettings{}, false, nil
+		return appSettings{}, nil
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return appSettings{}, false, nil
+		return appSettings{}, nil
 	}
 	if err != nil {
-		return appSettings{}, false, err
+		return appSettings{}, err
 	}
 	if len(strings.TrimSpace(string(data))) == 0 {
-		return appSettings{}, false, nil
+		return appSettings{}, nil
 	}
 	var settings appSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return appSettings{}, false, err
+		return appSettings{}, err
 	}
-	return settings, true, nil
+	return settings, nil
 }
 
 func saveSettings(path string, settings appSettings) error {
@@ -51,18 +45,20 @@ func saveSettings(path string, settings appSettings) error {
 		return err
 	}
 	data = append(data, '\n')
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
 	}
 	return os.WriteFile(path, data, 0o600)
 }
 
 func (m *Model) saveSettings() error {
-	m.settings = appSettings{
+	settings := appSettings{
 		ConfigPath: m.config.configPath,
 		NodeName:   m.rememberedNodeName,
 	}
-	return saveSettings(m.config.settingsPath, m.settings)
+	return saveSettings(m.config.settingsPath, settings)
 }
 
 func (m *Model) saveSettingsLogged() {

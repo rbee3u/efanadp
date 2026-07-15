@@ -18,6 +18,7 @@ before writing docs, tests, issues, commits, or review notes.
 Treat these as private:
 
 - `config.yaml`
+- `settings.json`
 - private node URLs
 - account UUIDs
 - REALITY keys and short IDs
@@ -56,8 +57,10 @@ output before committing.
 
 ## Logs and Reports
 
-Logs can contain local client addresses, targets, and sniffed inner hosts. Keep
-`logs/` out of git and do not paste live logs into docs or comments.
+`settings.json` can contain local config paths and remembered node names. Logs
+can contain local client addresses, targets, and sniffed inner hosts. Keep
+`settings.json` and `logs/` out of git and do not paste live logs into docs or
+comments.
 
 Useful reports describe:
 

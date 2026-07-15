@@ -170,9 +170,7 @@ func (a *udpAssociation) close() {
 		closeQuietly(a.udpConn)
 		closeUDPTargets(a.markClosedAndTakeTargets())
 		a.targetGroup.Wait()
-		close(a.closeDone)
 	})
-	<-a.closeDone
 }
 
 func (a *udpAssociation) markClosedAndTakeTargets() []*udpTarget {

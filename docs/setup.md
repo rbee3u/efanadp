@@ -2,7 +2,8 @@
 
 This guide covers daily use. Privacy rules live in
 [`privacy.md`](privacy.md); config field details live in
-[`configuration.md`](configuration.md); failure-mode notes live in
+[`configuration.md`](configuration.md); log details live in
+[`logging.md`](logging.md); failure-mode notes live in
 [`troubleshooting.md`](troubleshooting.md); protocol details live in
 [`x365-protocol.md`](x365-protocol.md).
 
@@ -13,7 +14,7 @@ This guide covers daily use. Privacy rules live in
 2. Start the TUI with `make run`.
 3. Select a node and point mihomo at the local SOCKS5 listener.
 
-Keep `config.yaml` and runtime logs untracked. Use
+Keep `config.yaml`, `settings.json`, and runtime logs untracked. Use
 [`privacy.md`](privacy.md) before sharing failures or examples.
 
 The default local listener is:
@@ -25,7 +26,7 @@ The default local listener is:
 The config path is resolved in this order:
 
 1. `--config` / `-c`.
-2. `configPath` in `~/.efanadp/settings.json`.
+2. `configPath` in `settings.json` in the current working directory.
 3. `config.yaml` in the current directory.
 
 For a one-off config path, run:
@@ -37,7 +38,7 @@ make run ARGS="--config proxy.yaml"
 The TUI persists the last successful config path and node in:
 
 ```text
-~/.efanadp/settings.json
+settings.json
 ```
 
 On the next launch without `--config`, it restores them and starts the last node
@@ -116,54 +117,10 @@ Runtime logs are written to the configured `log.output`. The default is:
 logs/app.log
 ```
 
-`log.output` also accepts `stdout` and `stderr`. File outputs rotate at 100 MiB.
-`log.format` can be `text` or `json`, and `log.level` can be `debug`, `info`,
-`warn`/`warning`, or `error`.
-
-The TUI uses stdout for rendering, so keep the default file output or use
-`stderr` if you want terminal logs while the TUI is running.
-
 Logs can contain local addresses, targets, and sniffed inner hosts. Keep them
 out of git and redact them before sharing; see
-[`privacy.md`](privacy.md) for report-safe summaries.
-
-In text format, the logger wraps each message with timestamp and level fields.
-The message body logs each TCP stream on open and close. If Shadowsocks sniffing
-resolves an inner target, an update line is logged too:
-
-```text
-[tcp #1] open source=127.0.0.1:53241 target=203.0.113.10:39281
-[tcp #1] update source=127.0.0.1:53241 target=203.0.113.10:39281->www.example.org:443
-[tcp #1] close source=127.0.0.1:53241 target=203.0.113.10:39281->www.example.org:443 time=420ms up=593B down=3.4KiB
-```
-
-UDP associations are logged as `udp`. If a UDP payload is Shadowsocks traffic to
-a configured landing server, the adapter also tries to sniff the inner UDP
-target:
-
-```text
-[udp #31] open source=127.0.0.1:57522 target=UDP_ASSOCIATE 0.0.0.0:0
-[udp] open target=203.0.113.10:39281
-[udp] sniff target=203.0.113.10:39281->stun.example.org:3478
-[udp #31] update source=127.0.0.1:57522 target=203.0.113.10:39281->stun.example.org:3478
-```
-
-Fields:
-
-- `source`: the local SOCKS client, usually mihomo.
-- `target`: the target from the SOCKS request. When optional Shadowsocks
-  sniffing is configured and succeeds, it is shown as
-  `landing-host:port->inner-host:port`.
-- `time`: connection lifetime.
-- `up`: bytes sent from the local client to the remote target.
-- `down`: bytes received from the remote target.
-
-When a stream ends with an error, the close line adds an `err=...` suffix.
-Benign cases such as `EOF` or client timeouts are expected when a client opens a
-speculative connection and abandons it.
-
-Because this adapter sits behind mihomo, it usually cannot see the original
-browser process name. Check mihomo's own connection panel for that.
+[`privacy.md`](privacy.md) for report-safe summaries. Output options and event
+examples are in [`logging.md`](logging.md).
 
 ## Smoke Tests
 

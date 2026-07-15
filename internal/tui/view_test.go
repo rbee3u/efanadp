@@ -122,7 +122,7 @@ func TestNodeListSwitchHintUsesBottomNoticeRail(t *testing.T) {
 	model.state = stateRunning
 	model.nodes = nodes
 	model.service = &runningService{}
-	model.setCurrentNode(nodes[3])
+	setRunningNode(model, nodes[3])
 
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 32})
 	model = requireModel(t, updated)
@@ -248,7 +248,7 @@ func TestNodeListPaginationVisibleAfterSelectingCurrentNodePage(t *testing.T) {
 	model.state = stateRunning
 	model.nodes = nodes
 	model.service = &runningService{}
-	model.setCurrentNode(current)
+	setRunningNode(model, current)
 
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 128, Height: 42})
 	model = requireModel(t, updated)
@@ -357,7 +357,7 @@ func TestWindowHeaderBannerAdaptsToTerminalSize(t *testing.T) {
 func TestViewFillsTerminalHeightRegardlessOfConnectionCount(t *testing.T) {
 	model := newTestModel(Options{ConfigPath: "config.yaml"})
 	model.service = &runningService{listen: "127.0.0.1:10865"}
-	model.setCurrentNode(testNode())
+	setRunningNode(model, testNode())
 	model.state = stateRunning
 
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 32})
@@ -383,7 +383,7 @@ func TestViewNeverExceedsTerminalHeightKeepingTopBorder(t *testing.T) {
 	for _, size := range sizes {
 		model := newTestModel(Options{ConfigPath: "config.yaml"})
 		model.service = &runningService{listen: "127.0.0.1:10865"}
-		model.setCurrentNode(testNode())
+		setRunningNode(model, testNode())
 		model.nodes = []x365.Node{testNode()}
 		model.state = stateNodeList
 		model.setModeHint("Choose a node, press ↵ to confirm switch, esc to cancel")
@@ -420,7 +420,7 @@ func TestWindowFrameFitsTerminalWidth(t *testing.T) {
 func TestRunningSummaryShowsOnNodeAndRunningViews(t *testing.T) {
 	model := newTestModel(Options{ConfigPath: "config.yaml"})
 	model.service = &runningService{}
-	model.setCurrentNode(testNode())
+	setRunningNode(model, testNode())
 	model.connections.active = map[uint64]connectionItem{
 		1: {id: 1},
 		2: {id: 2},
@@ -485,7 +485,7 @@ func TestLocalSOCKS5LinkUsesLoopbackForWildcardListen(t *testing.T) {
 func TestNarrowRunningSummaryUsesCompactMetadata(t *testing.T) {
 	model := newTestModel(Options{ConfigPath: "config.yaml"})
 	model.service = &runningService{listen: "127.0.0.1:10865"}
-	model.setCurrentNode(testNode())
+	setRunningNode(model, testNode())
 	model.connections.active = map[uint64]connectionItem{1: {id: 1}}
 
 	summary := stripANSI(model.renderRunningSummary(50))
@@ -594,7 +594,7 @@ func TestRunningSwitchResetsNodeListToCurrentNode(t *testing.T) {
 	model.nodes = []x365.Node{other, current}
 	model.nodeList = newNodeList(nodeItems(model.nodes))
 	model.service = &runningService{}
-	model.setCurrentNode(current)
+	setRunningNode(model, current)
 	model.nodeList.SetFilterText("other")
 	model.nodeList.Select(0)
 

@@ -71,7 +71,6 @@ type udpAssociation struct {
 
 	targetGroup sync.WaitGroup
 	closeOnce   sync.Once
-	closeDone   chan struct{}
 }
 
 type udpClientPacket struct {
@@ -97,7 +96,6 @@ func newUDPAssociation(
 		targets:     make(map[string]*udpTarget),
 		seenTargets: make(map[string]struct{}),
 		stats:       stats,
-		closeDone:   make(chan struct{}),
 	}
 }
 

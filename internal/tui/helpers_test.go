@@ -22,7 +22,17 @@ func stripANSI(value string) string {
 }
 
 func newTestModel(opts Options) *Model {
-	return newModel(startupConfig{runtime: newRuntimeConfig(opts)}, modelDeps{})
+	runtime := newRuntimeConfig(opts)
+	// Unit models should not write repo-local settings unless a test opts in.
+	runtime.settingsPath = ""
+	return newModel(startupConfig{runtime: runtime}, modelDeps{})
+}
+
+func setRunningNode(model *Model, node x365.Node) {
+	if model.service == nil {
+		model.service = &runningService{}
+	}
+	model.service.node = node
 }
 
 func assertWindowRunningSummary(t *testing.T, view string) {

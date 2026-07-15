@@ -4,17 +4,20 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/goccy/go-yaml"
 )
+
+type rawLogConfig struct {
+	Level  *string `yaml:"level"`
+	Format *string `yaml:"format"`
+	Output *string `yaml:"output"`
+}
 
 func runtimeConfigFromRaw(raw rawConfig) (string, LogConfig, error) {
 	if raw.LogPath != nil {
 		return "", LogConfig{}, errors.New("log_path is no longer supported; use log.output")
 	}
 
-	rawLog, presence := rawLogConfigFromMap(raw.Log)
-	logConfig, err := normalizeLogConfig(rawLog, presence)
+	logConfig, err := normalizeLogConfig(raw.Log)
 	if err != nil {
 		return "", LogConfig{}, err
 	}
@@ -22,56 +25,22 @@ func runtimeConfigFromRaw(raw rawConfig) (string, LogConfig, error) {
 	return defaultListen(raw.Listen), logConfig, nil
 }
 
-func rawLogConfigFromMap(items yaml.MapSlice) (LogConfig, logFieldPresence) {
-	var raw LogConfig
-	var presence logFieldPresence
-	for _, item := range items {
-		key, ok := item.Key.(string)
-		if !ok {
-			continue
-		}
-		value := rawConfigString(item.Value)
-		switch key {
-		case "level":
-			presence.level = true
-			raw.Level = value
-		case "format":
-			presence.format = true
-			raw.Format = value
-		case "output":
-			presence.output = true
-			raw.Output = value
-		}
-	}
-	return raw, presence
-}
-
-func rawConfigString(value any) string {
-	if value == nil {
-		return ""
-	}
-	if text, ok := value.(string); ok {
-		return text
-	}
-	return fmt.Sprint(value)
-}
-
-func normalizeLogConfig(raw LogConfig, presence logFieldPresence) (LogConfig, error) {
+func normalizeLogConfig(raw rawLogConfig) (LogConfig, error) {
 	config := DefaultLogConfig()
 
-	level, err := normalizeLogLevel(raw.Level, presence.level)
+	level, err := normalizeLogLevel(raw.Level)
 	if err != nil {
 		return LogConfig{}, err
 	}
 	config.Level = level
 
-	output, err := normalizeLogOutput(raw.Output, presence.output)
+	output, err := normalizeLogOutput(raw.Output)
 	if err != nil {
 		return LogConfig{}, err
 	}
 	config.Output = output
 
-	format, err := normalizeLogFormat(raw.Format, presence.format)
+	format, err := normalizeLogFormat(raw.Format)
 	if err != nil {
 		return LogConfig{}, err
 	}
@@ -80,13 +49,13 @@ func normalizeLogConfig(raw LogConfig, presence logFieldPresence) (LogConfig, er
 	return config, nil
 }
 
-func normalizeLogLevel(value string, set bool) (string, error) {
-	level := strings.ToLower(strings.TrimSpace(value))
-	if level == "" {
-		if set {
-			return "", errors.New("invalid log.level: empty value")
-		}
+func normalizeLogLevel(value *string) (string, error) {
+	if value == nil {
 		return DefaultLogLevel, nil
+	}
+	level := strings.ToLower(strings.TrimSpace(*value))
+	if level == "" {
+		return "", errors.New("invalid log.level: empty value")
 	}
 	if level == "warning" {
 		level = "warn"
@@ -95,17 +64,17 @@ func normalizeLogLevel(value string, set bool) (string, error) {
 	case "debug", "info", "warn", "error":
 		return level, nil
 	default:
-		return "", fmt.Errorf("invalid log.level %q: expected debug, info, warn, warning, or error", value)
+		return "", fmt.Errorf("invalid log.level %q: expected debug, info, warn, warning, or error", *value)
 	}
 }
 
-func normalizeLogOutput(value string, set bool) (string, error) {
-	output := strings.TrimSpace(value)
-	if output == "" {
-		if set {
-			return "", errors.New("invalid log.output: empty value")
-		}
+func normalizeLogOutput(value *string) (string, error) {
+	if value == nil {
 		return DefaultLogOutput, nil
+	}
+	output := strings.TrimSpace(*value)
+	if output == "" {
+		return "", errors.New("invalid log.output: empty value")
 	}
 	if strings.ContainsRune(output, 0) {
 		return "", errors.New("invalid log.output: path contains NUL byte")
@@ -119,18 +88,18 @@ func normalizeLogOutput(value string, set bool) (string, error) {
 	return output, nil
 }
 
-func normalizeLogFormat(value string, set bool) (string, error) {
-	format := strings.ToLower(strings.TrimSpace(value))
-	if format == "" {
-		if set {
-			return "", errors.New("invalid log.format: empty value")
-		}
+func normalizeLogFormat(value *string) (string, error) {
+	if value == nil {
 		return DefaultLogFormat, nil
+	}
+	format := strings.ToLower(strings.TrimSpace(*value))
+	if format == "" {
+		return "", errors.New("invalid log.format: empty value")
 	}
 	switch format {
 	case "text", "json":
 		return format, nil
 	default:
-		return "", fmt.Errorf("invalid log.format %q: expected text or json", value)
+		return "", fmt.Errorf("invalid log.format %q: expected text or json", *value)
 	}
 }

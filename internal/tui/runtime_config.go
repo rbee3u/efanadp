@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/rbee3u/efanadp/internal/config"
-	"github.com/rbee3u/efanadp/internal/x365"
 )
 
 const (
@@ -14,9 +13,7 @@ const (
 
 type runtimeConfig struct {
 	configPath       string
-	listen           string
-	log              config.LogConfig
-	sniffConfigs     []x365.ShadowsocksSniffConfig
+	loaded           config.Config
 	settingsPath     string
 	timeout          time.Duration
 	handshakeTimeout time.Duration
@@ -25,16 +22,16 @@ type runtimeConfig struct {
 func newRuntimeConfig(opts Options) runtimeConfig {
 	return runtimeConfig{
 		configPath:       strings.TrimSpace(opts.ConfigPath),
-		listen:           config.DefaultListen,
-		log:              config.DefaultLogConfig(),
-		settingsPath:     strings.TrimSpace(opts.SettingsPath),
+		loaded:           defaultLoadedConfig(),
+		settingsPath:     defaultSettingsPath,
 		timeout:          opts.Timeout,
 		handshakeTimeout: opts.HandshakeTimeout,
 	}
 }
 
-func applyLoadedRuntimeConfig(runtime *runtimeConfig, loaded config.Config) {
-	runtime.listen = loaded.Listen
-	runtime.log = loaded.Log
-	runtime.sniffConfigs = loaded.ShadowsocksSniffConfigs
+func defaultLoadedConfig() config.Config {
+	return config.Config{
+		Listen: config.DefaultListen,
+		Log:    config.DefaultLogConfig(),
+	}
 }

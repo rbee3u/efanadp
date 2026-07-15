@@ -7,10 +7,11 @@ verified changes.
 
 ## Safety Rules
 
-- Treat `config.yaml`, private node URLs, account UUIDs, REALITY keys, captures,
-  provider domains, and live logs as private. Never commit, quote, or derive
-  examples from them. Do not open private config unless the user explicitly asks
-  for runtime debugging; when reporting failures, summarize and redact.
+- Treat `config.yaml`, `settings.json`, private node URLs, account UUIDs,
+  REALITY keys, captures, provider domains, and live logs as private. Never
+  commit, quote, or derive examples from them. Do not open private config unless
+  the user explicitly asks for runtime debugging; when reporting failures,
+  summarize and redact.
 - Use only sanitized placeholders in docs and tests, such as `example.org`,
   `example.net`, `203.0.113.10`, and `<your-x365-uuid>`.
 - Keep `config.reference.yaml` as the committed, sanitized reference template.
@@ -122,7 +123,8 @@ EFANADP_CONFIG=config.yaml EFANADP_NODE_INDEX=0 go test -tags manual ./internal/
 | --- | --- |
 | `docs/README.md` | the documentation index or split changes |
 | `docs/privacy.md` | private-material handling, sanitization, template safety, or sharing guidance changes |
-| `docs/setup.md` | operation, mihomo rules, TUI controls, logs, or smoke tests change |
+| `docs/setup.md` | operation, mihomo rules, TUI controls, or smoke tests change |
+| `docs/logging.md` | log outputs, event fields, redaction notes, or TCP/UDP log examples change |
 | `docs/troubleshooting.md` | curl, fake-IP, browser DNS/DoH, loop, QUIC, UDP/443, or config-load troubleshooting changes |
 | `docs/configuration.md` | `config.yaml`, `config.reference.yaml`, or `sniff.shadowsocks` changes |
 | `docs/architecture.md` | package responsibilities, TUI lifecycle, or relay behavior changes |

@@ -14,7 +14,7 @@ import (
 func BenchmarkActiveConnectionsView(b *testing.B) {
 	model := newTestModel(Options{})
 	model.state = stateRunning
-	model.service = &runningService{id: 1, nodeName: "bench"}
+	model.service = &runningService{id: 1}
 	model.width = 160
 	model.height = 48
 	model.connections.active = make(map[uint64]connectionItem)
@@ -117,7 +117,7 @@ func TestRunningViewShowsPagedActiveConnections(t *testing.T) {
 	model := newTestModel(Options{ConfigPath: "proxy.yaml"})
 	model.state = stateRunning
 	model.service = &runningService{}
-	model.setCurrentNode(testNode())
+	setRunningNode(model, testNode())
 	model.connections.active = make(map[uint64]connectionItem)
 	model.connections.closed = 2
 	model.connections.now = startedAt.Add(90 * time.Second)

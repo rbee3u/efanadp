@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -113,6 +114,55 @@ func TestUDPAssociationGetTargetClosesDuplicateOpen(t *testing.T) {
 	assoc.close()
 	if got := existing.closeCount.Load(); got != 1 {
 		t.Fatalf("existing close count after association close=%d, want 1", got)
+	}
+}
+
+func TestUDPAssociationWriteFailureClosesTargetAndReopens(t *testing.T) {
+	writeErr := errors.New("write failed")
+	opened := make(chan *writeFailingStream, 2)
+	cfg := Config{
+		Upstream: testUpstream{
+			openUDP: func(_ context.Context, host string, port int) (io.ReadWriteCloser, error) {
+				if host != "example.com" || port != 53 {
+					return nil, fmt.Errorf("unexpected target %s", udpTargetKey(host, port))
+				}
+				stream := newWriteFailingStream(writeErr)
+				opened <- stream
+				return stream, nil
+			},
+		},
+	}
+	assoc := newUDPAssociation(t.Context().Done(), cfg, nil, &connectionTracker{stats: &Stats{}})
+	defer assoc.close()
+
+	packet := udpClientPacket{
+		addr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53000},
+		datagram: socksUDPDatagram{
+			Host:    "example.com",
+			Port:    53,
+			Payload: []byte("query"),
+		},
+	}
+	if err := assoc.forwardClientPacket(t.Context(), packet); err != nil {
+		t.Fatal(err)
+	}
+	first := receiveWithin(t, opened, "first UDP target open")
+	if got := first.closeCount.Load(); got != 1 {
+		t.Fatalf("first target close count=%d, want 1", got)
+	}
+	if target, err := assoc.lookupTarget(udpTargetKey("example.com", 53)); err != nil || target != nil {
+		t.Fatalf("target after write failure=%+v err=%v, want removed", target, err)
+	}
+
+	if err := assoc.forwardClientPacket(t.Context(), packet); err != nil {
+		t.Fatal(err)
+	}
+	second := receiveWithin(t, opened, "second UDP target open")
+	if second == first {
+		t.Fatal("second datagram reused failed target")
+	}
+	if got := second.closeCount.Load(); got != 1 {
+		t.Fatalf("second target close count=%d, want 1", got)
 	}
 }
 
@@ -281,6 +331,22 @@ func (s *closeCountingStream) Close() error {
 		close(s.closed)
 	}
 	return nil
+}
+
+type writeFailingStream struct {
+	*closeCountingStream
+	err error
+}
+
+func newWriteFailingStream(err error) *writeFailingStream {
+	return &writeFailingStream{
+		closeCountingStream: newCloseCountingStream(),
+		err:                 err,
+	}
+}
+
+func (s *writeFailingStream) Write([]byte) (int, error) {
+	return 0, s.err
 }
 
 type onePacketStream struct {

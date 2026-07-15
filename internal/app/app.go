@@ -61,7 +61,6 @@ func runHelp(args []string, stdout io.Writer) error {
 func runTUI(configPath string) error {
 	return tui.Run(tui.Options{
 		ConfigPath:       configPath,
-		SettingsPath:     tui.DefaultSettingsPath(),
 		Timeout:          10 * time.Second,
 		HandshakeTimeout: 15 * time.Second,
 	})

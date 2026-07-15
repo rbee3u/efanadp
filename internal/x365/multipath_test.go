@@ -173,6 +173,54 @@ func TestMultipathConnReadBuffersPayloadRemainderAndACKsOnce(t *testing.T) {
 	assertSingleACKFrame(t, stream.write.Bytes(), 12)
 }
 
+func TestMultipathConnReadLargeFrameBuffersOnlyRemainder(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 128*1024)
+	frameBytes, err := buildFrame(frameData, 7, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := &memoryStream{read: *bytes.NewBuffer(frameBytes)}
+	conn := &multipathConn{stream: stream, framer: &multipathFramer{}}
+
+	buf := make([]byte, 64*1024)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefixMatch := bytes.Equal(buf, payload[:len(buf)])
+	if n != len(buf) || !prefixMatch {
+		t.Fatalf("read n=%d prefix match=%t, want first %d bytes", n, prefixMatch, len(buf))
+	}
+	if !bytes.Equal(conn.readBuf, payload[len(buf):]) {
+		t.Fatalf("buffered remainder len=%d, want %d", len(conn.readBuf), len(payload)-len(buf))
+	}
+	assertSingleACKFrame(t, stream.write.Bytes(), 7+uint64(len(payload)))
+}
+
+func TestMultipathConnReadLargeFrameEOFInRemainderDoesNotACK(t *testing.T) {
+	frameBytes, err := buildFrame(frameData, 7, []byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := &memoryStream{read: *bytes.NewBuffer(frameBytes[:frameHeaderSize+3])}
+	conn := &multipathConn{stream: stream, framer: &multipathFramer{}}
+
+	buf := make([]byte, 2)
+	n, err := conn.Read(buf)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err=%v, want unexpected EOF", err)
+	}
+	if n != 0 {
+		t.Fatalf("read n=%d, want 0 for incomplete frame", n)
+	}
+	if len(conn.readBuf) != 0 {
+		t.Fatalf("readBuf len=%d, want no buffered partial frame", len(conn.readBuf))
+	}
+	if stream.write.Len() != 0 {
+		t.Fatalf("ACK bytes=%d, want no ACK for incomplete frame", stream.write.Len())
+	}
+}
+
 func TestMultipathConnCloseIsIdempotent(t *testing.T) {
 	stream := &memoryStream{}
 	conn := &multipathConn{stream: stream, framer: &multipathFramer{}}
@@ -275,6 +323,36 @@ func BenchmarkMultipathConnWrite(b *testing.B) {
 	}
 }
 
+func BenchmarkMultipathConnReadLargeFrameSmallBuffer(b *testing.B) {
+	payload := bytes.Repeat([]byte("x"), 128*1024)
+	frameBytes, err := buildFrame(frameData, 99, payload)
+	if err != nil {
+		b.Fatal(err)
+	}
+	buf := make([]byte, 64*1024)
+	reader := bytes.NewReader(frameBytes)
+	stream := &readDiscardStream{reader: reader}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		reader.Reset(frameBytes)
+		conn := &multipathConn{
+			stream: stream,
+			framer: &multipathFramer{},
+		}
+		n, err := conn.Read(buf)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if n != len(buf) {
+			b.Fatalf("read %d bytes, want %d", n, len(buf))
+		}
+		if len(conn.readBuf) != len(payload)-len(buf) {
+			b.Fatalf("buffered %d bytes, want %d", len(conn.readBuf), len(payload)-len(buf))
+		}
+	}
+}
+
 type memoryStream struct {
 	read       bytes.Buffer
 	write      bytes.Buffer
@@ -283,6 +361,10 @@ type memoryStream struct {
 }
 
 type discardStream struct{}
+
+type readDiscardStream struct {
+	reader *bytes.Reader
+}
 
 func (discardStream) Read([]byte) (int, error) {
 	return 0, io.EOF
@@ -293,6 +375,18 @@ func (discardStream) Write(p []byte) (int, error) {
 }
 
 func (discardStream) Close() error {
+	return nil
+}
+
+func (s *readDiscardStream) Read(p []byte) (int, error) {
+	return s.reader.Read(p)
+}
+
+func (s *readDiscardStream) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (s *readDiscardStream) Close() error {
 	return nil
 }
 

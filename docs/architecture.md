@@ -31,7 +31,7 @@ cmd/efanadp.main
   -> app.Run
   -> app command dispatcher
   -> tui.Run
-    -> load settings from ~/.efanadp/settings.json
+    -> load settings from settings.json in the current working directory
     -> resolve --config/-c, settings configPath, or config.yaml
     -> config.Load resolved YAML file
     -> select node
@@ -60,8 +60,9 @@ confirmed. Config file changes are applied by restarting `efanadp`.
 - Optional `sniff.shadowsocks` entries.
 
 The TUI stores only the last successful config path and node name in
-`~/.efanadp/settings.json`. It does not persist node contents. The startup
-config path priority is explicit CLI path, then settings, then `config.yaml`.
+`settings.json` in the current working directory. It does not persist node
+contents. The startup config path priority is explicit CLI path, then settings,
+then `config.yaml`.
 
 ## SOCKS5 Server
 
@@ -154,7 +155,8 @@ fails.
 - Keep protocol byte layouts in `x365-protocol.md`.
 - Keep private-material and sanitization guidance in `privacy.md`.
 - Keep config shape and template behavior in `configuration.md`.
-- Keep user-facing operation, logging, and TUI notes in `setup.md`.
+- Keep user-facing operation and TUI notes in `setup.md`.
+- Keep log output behavior and event examples in `logging.md`.
 - Keep fake-IP, DNS, loop, QUIC, and UDP/443 symptoms in `troubleshooting.md`.
 - Prefer tests with injected dialers/callbacks over live network tests.
 - Use the `manual` build tag only for private, opt-in probes.

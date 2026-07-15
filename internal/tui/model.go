@@ -27,12 +27,10 @@ type Model struct {
 
 	service       *runningService
 	pendingStart  *pendingStart
-	currentNode   *x365.Node
 	nextServiceID int
 
 	connections connectionState
 
-	settings           appSettings
 	rememberedNodeName string
 	startupNode        *x365.Node
 }
@@ -115,7 +113,7 @@ func (m *Model) requestQuit() tea.Cmd {
 	if m.state != stateQuitting {
 		m.state = stateQuitting
 		m.clearModeHint()
-		m.setStatus(statusInfo, "Stopping service before quit: "+m.service.nodeName)
+		m.setStatus(statusInfo, "Stopping service before quit: "+m.service.node.Name)
 		m.stopService()
 	}
 	return nil

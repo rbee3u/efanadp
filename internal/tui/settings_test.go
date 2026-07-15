@@ -11,27 +11,32 @@ import (
 )
 
 func TestSettingsRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), ".efanadp", "settings.json")
+	path := filepath.Join(t.TempDir(), "settings.json")
 	want := appSettings{ConfigPath: "proxy.yaml", NodeName: "test-node"}
 
 	if err := saveSettings(path, want); err != nil {
 		t.Fatal(err)
 	}
-	got, ok, err := loadSettings(path)
+	got, err := loadSettings(path)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !ok {
-		t.Fatal("expected settings to load")
 	}
 	if got != want {
 		t.Fatalf("settings=%+v, want %+v", got, want)
 	}
 }
 
+func TestNewRuntimeConfigUsesWorkingDirectorySettingsPath(t *testing.T) {
+	runtime := newRuntimeConfig(Options{})
+	if runtime.settingsPath != defaultSettingsPath {
+		t.Fatalf("settings path=%q, want %q", runtime.settingsPath, defaultSettingsPath)
+	}
+}
+
 func TestSaveSettingsFailureShowsWarning(t *testing.T) {
 	settingsPath := t.TempDir()
-	model := newTestModel(Options{SettingsPath: settingsPath})
+	model := newTestModel(Options{})
+	model.config.settingsPath = settingsPath
 	model.config.configPath = "proxy.yaml"
 	model.rememberedNodeName = "test-node"
 	model.setStatus(statusSuccess, "Loaded config")
@@ -48,30 +53,26 @@ func TestSaveSettingsFailureShowsWarning(t *testing.T) {
 
 func TestResolveConfigPathPrecedence(t *testing.T) {
 	tests := []struct {
-		name           string
-		explicit       string
-		settings       appSettings
-		loadedSettings bool
-		want           string
+		name     string
+		explicit string
+		settings appSettings
+		want     string
 	}{
 		{
-			name:           "explicit flag wins",
-			explicit:       "flag.yaml",
-			settings:       appSettings{ConfigPath: "settings.yaml"},
-			loadedSettings: true,
-			want:           "flag.yaml",
+			name:     "explicit flag wins",
+			explicit: "flag.yaml",
+			settings: appSettings{ConfigPath: "settings.yaml"},
+			want:     "flag.yaml",
 		},
 		{
-			name:           "settings fallback",
-			settings:       appSettings{ConfigPath: "settings.yaml"},
-			loadedSettings: true,
-			want:           "settings.yaml",
+			name:     "settings fallback",
+			settings: appSettings{ConfigPath: "settings.yaml"},
+			want:     "settings.yaml",
 		},
 		{
-			name:           "empty settings path uses default",
-			settings:       appSettings{ConfigPath: "  "},
-			loadedSettings: true,
-			want:           "config.yaml",
+			name:     "empty settings path uses default",
+			settings: appSettings{ConfigPath: "  "},
+			want:     "config.yaml",
 		},
 		{
 			name: "missing settings uses default",
@@ -81,7 +82,7 @@ func TestResolveConfigPathPrecedence(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveConfigPath(tt.explicit, tt.settings, tt.loadedSettings)
+			got := resolveConfigPath(tt.explicit, tt.settings)
 			if got != tt.want {
 				t.Fatalf("resolveConfigPath()=%q, want %q", got, tt.want)
 			}
@@ -91,14 +92,14 @@ func TestResolveConfigPathPrecedence(t *testing.T) {
 
 func TestPrepareStartupUsesSettingsConfigPath(t *testing.T) {
 	dir := t.TempDir()
+	t.Chdir(dir)
 	configPath := filepath.Join(dir, "proxy.yaml")
 	writeStartupConfig(t, configPath)
-	settingsPath := filepath.Join(dir, "settings.json")
-	if err := saveSettings(settingsPath, appSettings{ConfigPath: configPath}); err != nil {
+	if err := saveSettings(defaultSettingsPath, appSettings{ConfigPath: configPath}); err != nil {
 		t.Fatal(err)
 	}
 
-	startup, err := prepareStartup(Options{SettingsPath: settingsPath})
+	startup, err := prepareStartup(Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,23 +107,20 @@ func TestPrepareStartupUsesSettingsConfigPath(t *testing.T) {
 	if startup.runtime.configPath != configPath {
 		t.Fatalf("config path=%q, want %q", startup.runtime.configPath, configPath)
 	}
-	if !startup.loadedSettings {
-		t.Fatal("expected settings to load")
-	}
 }
 
 func TestPrepareStartupUsesExplicitConfigPathOverSettings(t *testing.T) {
 	dir := t.TempDir()
+	t.Chdir(dir)
 	explicitPath := filepath.Join(dir, "explicit.yaml")
 	settingsConfigPath := filepath.Join(dir, "settings.yaml")
 	writeStartupConfig(t, explicitPath)
 	writeStartupConfig(t, settingsConfigPath)
-	settingsPath := filepath.Join(dir, "settings.json")
-	if err := saveSettings(settingsPath, appSettings{ConfigPath: settingsConfigPath}); err != nil {
+	if err := saveSettings(defaultSettingsPath, appSettings{ConfigPath: settingsConfigPath}); err != nil {
 		t.Fatal(err)
 	}
 
-	startup, err := prepareStartup(Options{ConfigPath: explicitPath, SettingsPath: settingsPath})
+	startup, err := prepareStartup(Options{ConfigPath: explicitPath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,8 +134,11 @@ func TestPrepareStartupFallsBackWhenSettingsReadFails(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	writeStartupConfig(t, "config.yaml")
+	if err := os.Mkdir(defaultSettingsPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
 
-	startup, err := prepareStartup(Options{SettingsPath: dir})
+	startup, err := prepareStartup(Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,11 +153,10 @@ func TestPrepareStartupFallsBackWhenSettingsReadFails(t *testing.T) {
 
 func TestNewModelRestoresSettingsNode(t *testing.T) {
 	runtime := newRuntimeConfig(Options{ConfigPath: "proxy.yaml"})
+	runtime.loaded = config.Config{Nodes: []x365.Node{testNode()}}
 	model := newModel(startupConfig{
-		runtime:        runtime,
-		loaded:         config.Config{Nodes: []x365.Node{testNode()}},
-		settings:       appSettings{ConfigPath: "proxy.yaml", NodeName: "test-node"},
-		loadedSettings: true,
+		runtime:  runtime,
+		settings: appSettings{ConfigPath: "proxy.yaml", NodeName: "test-node"},
 	}, modelDeps{})
 
 	if got := model.rememberedNodeName; got != "test-node" {
