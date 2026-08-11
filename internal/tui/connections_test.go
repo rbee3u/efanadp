@@ -40,21 +40,120 @@ func BenchmarkActiveConnectionsView(b *testing.B) {
 	}
 }
 
+func TestConnectionEventWaiterDrainsQueuedBurst(t *testing.T) {
+	events := newConnectionQueue()
+	stopped := make(chan struct{})
+	for i := range 5 {
+		events.push(proxy.Event{ID: uint64(i + 1), Type: proxy.ConnectionOpened, Stats: &proxy.Stats{}})
+	}
+
+	msg, ok := waitConnectionEvent(3, events, stopped)().(connectionEventMsg)
+	if !ok {
+		t.Fatal("waiter did not produce a connectionEventMsg")
+	}
+	if len(msg.events) != 5 {
+		t.Fatalf("drained %d events, want the whole queued burst of 5", len(msg.events))
+	}
+	if left := events.take(); left != nil {
+		t.Fatalf("%d events left queued, want the queue emptied in one wake", len(left))
+	}
+}
+
+// The producer runs on proxy goroutines and cannot block on the UI, but a
+// dropped ConnectionClosed is unrecoverable: nothing else tells the model that
+// connection ended, so its row would stay active forever.
+func TestConnectionQueueKeepsEveryLifecycleEventUnderBurst(t *testing.T) {
+	events := newConnectionQueue()
+	const connections = 5000
+	for i := range connections {
+		id := uint64(i + 1)
+		events.push(proxy.Event{ID: id, Type: proxy.ConnectionOpened, Stats: &proxy.Stats{}})
+		events.push(proxy.Event{ID: id, Type: proxy.ConnectionClosed, Stats: &proxy.Stats{}})
+	}
+
+	model := newTestModel(Options{})
+	model.service = &runningService{id: 1, connectionEvents: events, eventsDone: make(chan struct{})}
+	updated, _ := model.Update(connectionEventMsg{serviceID: 1, events: events.take()})
+	model = requireModel(t, updated)
+
+	if got := model.connections.activeCount(); got != 0 {
+		t.Fatalf("active connections=%d, want 0; a dropped close leaves a phantom row", got)
+	}
+	if model.connections.closed != connections {
+		t.Fatalf("closed connections=%d, want %d", model.connections.closed, connections)
+	}
+}
+
+// Updates only carry the newest label for a connection, so coalescing them is
+// what keeps the queue bounded without dropping opens or closes.
+func TestConnectionQueueCoalescesRepeatedUpdates(t *testing.T) {
+	events := newConnectionQueue()
+	events.push(proxy.Event{ID: 1, Type: proxy.ConnectionOpened, Target: "example.org:443"})
+	for i := range 100 {
+		events.push(proxy.Event{
+			ID:     1,
+			Type:   proxy.ConnectionUpdated,
+			Target: fmt.Sprintf("example.org:443->example.net:%d", 1000+i),
+		})
+	}
+	events.push(proxy.Event{ID: 2, Type: proxy.ConnectionOpened, Target: "example.net:80"})
+
+	batch := events.take()
+	if len(batch) != 3 {
+		t.Fatalf("queued %d events, want 3 (two opens plus one coalesced update)", len(batch))
+	}
+	if want := "example.org:443->example.net:1099"; batch[1].Target != want {
+		t.Fatalf("coalesced update target=%q, want the newest %q", batch[1].Target, want)
+	}
+	if batch[2].ID != 2 {
+		t.Fatalf("last queued event ID=%d, want the later open for 2", batch[2].ID)
+	}
+}
+
+// A dropped ConnectionClosed would leave its row active forever, so the whole
+// burst has to reach the model in one Update rather than one event per render.
+func TestConnectionEventBurstAppliesEveryCloseInOneUpdate(t *testing.T) {
+	model := newTestModel(Options{})
+	events := newConnectionQueue()
+	model.service = &runningService{id: 4, connectionEvents: events, eventsDone: make(chan struct{})}
+	startedAt := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+
+	burst := make([]proxy.Event, 0, 6)
+	for i := range 3 {
+		id := uint64(i + 1)
+		burst = append(
+			burst,
+			proxy.Event{ID: id, Type: proxy.ConnectionOpened, StartedAt: startedAt, Stats: &proxy.Stats{}},
+			proxy.Event{ID: id, Type: proxy.ConnectionClosed, StartedAt: startedAt, Stats: &proxy.Stats{}},
+		)
+	}
+
+	updated, _ := model.Update(connectionEventMsg{serviceID: 4, events: burst})
+	model = requireModel(t, updated)
+
+	if got := model.connections.activeCount(); got != 0 {
+		t.Fatalf("active connections=%d, want 0 after every close in the burst", got)
+	}
+	if model.connections.closed != 3 {
+		t.Fatalf("closed connections=%d, want 3", model.connections.closed)
+	}
+}
+
 func TestConnectionEventsUpdateActiveAndClosedCounts(t *testing.T) {
 	model := newTestModel(Options{})
-	model.service = &runningService{id: 7, connectionEvents: make(chan proxy.Event)}
+	model.service = &runningService{id: 7, connectionEvents: newConnectionQueue()}
 	startedAt := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
 
 	updated, _ := model.Update(connectionEventMsg{
 		serviceID: 7,
-		event: proxy.Event{
+		events: []proxy.Event{{
 			ID:        1,
 			Type:      proxy.ConnectionOpened,
 			Protocol:  "udp",
 			Source:    "127.0.0.1:50000",
 			Target:    "example.com:443",
 			StartedAt: startedAt,
-		},
+		}},
 	})
 	model = requireModel(t, updated)
 	if got := model.connections.activeCount(); got != 1 {
@@ -72,14 +171,14 @@ func TestConnectionEventsUpdateActiveAndClosedCounts(t *testing.T) {
 
 	updated, _ = model.Update(connectionEventMsg{
 		serviceID: 7,
-		event: proxy.Event{
+		events: []proxy.Event{{
 			ID:        1,
 			Type:      proxy.ConnectionUpdated,
 			Protocol:  "udp",
 			Source:    "127.0.0.1:50000",
 			Target:    "example.com:443->inner.example:443",
 			StartedAt: startedAt,
-		},
+		}},
 	})
 	model = requireModel(t, updated)
 	if got := model.connections.active[1].target; got != "example.com:443->inner.example:443" {
@@ -91,14 +190,14 @@ func TestConnectionEventsUpdateActiveAndClosedCounts(t *testing.T) {
 
 	updated, _ = model.Update(connectionEventMsg{
 		serviceID: 7,
-		event: proxy.Event{
+		events: []proxy.Event{{
 			ID:        1,
 			Type:      proxy.ConnectionClosed,
 			Source:    "127.0.0.1:50000",
 			Target:    "example.com:443",
 			StartedAt: startedAt,
 			ClosedAt:  startedAt.Add(time.Second),
-		},
+		}},
 	})
 	model = requireModel(t, updated)
 	if got := model.connections.activeCount(); got != 0 {
@@ -338,6 +437,43 @@ func TestConnectionRowsTruncateLongTargets(t *testing.T) {
 	}
 	if strings.Contains(view, "very-long-service-name.with.many.labels.example.com") {
 		t.Fatalf("connection table includes untruncated long target:\n%s", view)
+	}
+}
+
+func TestConnectionIDColumnSupportsSevenDigitsAndTruncatesLongerIDs(t *testing.T) {
+	tests := []struct {
+		name      string
+		id        uint64
+		wantWidth int
+		want      string
+	}{
+		{
+			name:      "seven digit ID",
+			id:        9_999_999,
+			wantWidth: 8,
+			want:      "#9999999",
+		},
+		{
+			name:      "ID beyond column limit",
+			id:        100_000_000,
+			wantWidth: 9,
+			want:      "#1000000…",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := connectionItem{id: tt.id}
+			layout := newConnectionTableLayout([]connectionItem{row}, time.Time{}, 118)
+			if layout.idWidth != tt.wantWidth {
+				t.Fatalf("ID column width=%d, want %d", layout.idWidth, tt.wantWidth)
+			}
+
+			got := formatConnectionCell(fmt.Sprintf("#%d", row.id), layout.idWidth, false)
+			if got != tt.want {
+				t.Fatalf("rendered ID=%q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

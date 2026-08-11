@@ -29,9 +29,13 @@ type serviceStoppedMsg struct {
 	err      error
 }
 
+// connectionEventMsg carries every event that was queued when the waiter woke.
+// Draining the queue in one Update keeps the producer's buffer from filling
+// during a connection burst: each Update triggers a full re-render, so applying
+// one event per render made the render cost the drain rate.
 type connectionEventMsg struct {
 	serviceID int
-	event     proxy.Event
+	events    []proxy.Event
 }
 
 type runningTickMsg struct {

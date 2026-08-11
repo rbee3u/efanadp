@@ -2,11 +2,19 @@ package x365
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"golang.org/x/net/http2"
 )
 
 func TestNewXHTTPRealityRequestUsesObservedHeaders(t *testing.T) {
@@ -54,13 +62,13 @@ func TestHTTPStreamCloseCancelsPendingRequest(t *testing.T) {
 		closeQuietly(pr)
 	}()
 
-	idleClosed := make(chan struct{}, 1)
+	connsClosed := make(chan struct{}, 1)
 	stream := &httpStream{
 		requestWriter: pw,
 		responseDone:  make(chan struct{}),
 		cancel:        cancel,
-		closeIdle: func() {
-			idleClosed <- struct{}{}
+		closeConns: func() {
+			connsClosed <- struct{}{}
 		},
 	}
 
@@ -71,10 +79,198 @@ func TestHTTPStreamCloseCancelsPendingRequest(t *testing.T) {
 		t.Fatalf("context err=%v, want canceled", ctx.Err())
 	}
 	select {
-	case <-idleClosed:
+	case <-connsClosed:
 	default:
-		t.Fatal("expected Close to close idle connections")
+		t.Fatal("expected Close to close the stream connections")
 	}
+}
+
+func TestStreamConnsCloseAllClosesAdoptedConns(t *testing.T) {
+	conns := &streamConns{}
+	first, second := &fakeStreamConn{}, &fakeStreamConn{}
+	conns.adopt(first)
+	conns.adopt(second)
+
+	conns.closeAll()
+
+	if !first.isClosed() || !second.isClosed() {
+		t.Fatalf("closed first=%v second=%v, want both closed", first.isClosed(), second.isClosed())
+	}
+}
+
+func TestStreamConnsAdoptAfterCloseClosesImmediately(t *testing.T) {
+	conns := &streamConns{}
+	conns.closeAll()
+
+	// A dial that finishes after the stream is gone must not park a live socket.
+	late := &fakeStreamConn{}
+	conns.adopt(late)
+
+	if !late.isClosed() {
+		t.Fatal("expected a conn adopted after closeAll to be closed immediately")
+	}
+}
+
+// TestHTTPStreamCloseReleasesServerConnections is the regression test for the
+// per-stream connection leak: closing a stream must take its TCP connection with
+// it. It runs the real httpStream wiring against a local h2c server, replacing
+// only the REALITY dial with a plain TCP dial.
+func TestHTTPStreamCloseReleasesServerConnections(t *testing.T) {
+	const streams = 8
+
+	server := startEchoH2CServer(t)
+	for i := range streams {
+		stream, conns := server.openStream(t)
+		if _, err := stream.Write([]byte("ping")); err != nil {
+			t.Fatalf("stream %d write: %v", i, err)
+		}
+		// Read the echo so the stream is fully established server-side before
+		// it is closed; a leak is only observable once a connection exists.
+		echo := make([]byte, len("ping"))
+		if _, err := io.ReadFull(stream, echo); err != nil {
+			t.Fatalf("stream %d read: %v", i, err)
+		}
+		if err := stream.Close(); err != nil {
+			t.Fatalf("stream %d close: %v", i, err)
+		}
+		_ = conns
+	}
+
+	if err := server.waitForLiveConns(0); err != nil {
+		t.Fatalf("after closing %d streams: %v", streams, err)
+	}
+}
+
+type echoH2CServer struct {
+	addr string
+	live atomic.Int64
+}
+
+func (s *echoH2CServer) openStream(tb testing.TB) (*httpStream, *streamConns) {
+	tb.Helper()
+	pr, pw := io.Pipe()
+	streamCtx, cancel := context.WithCancel(tb.Context())
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodPost, "http://"+s.addr+"/x365", pr)
+	if err != nil {
+		cancel()
+		tb.Fatal(err)
+	}
+
+	conns := &streamConns{}
+	transport := &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {
+			var dialer net.Dialer
+			conn, err := dialer.DialContext(ctx, "tcp", s.addr)
+			if err != nil {
+				return nil, err
+			}
+			conns.adopt(conn)
+			return conn, nil
+		},
+	}
+	stream := &httpStream{
+		requestWriter: pw,
+		responseDone:  make(chan struct{}),
+		cancel:        cancel,
+		closeConns:    conns.closeAll,
+	}
+	stream.startResponse(transport, req, pr)
+	return stream, conns
+}
+
+func (s *echoH2CServer) waitForLiveConns(want int64) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := s.live.Load()
+		if got == want {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("live server connections=%d, want %d", got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func startEchoH2CServer(tb testing.TB) *echoH2CServer {
+	tb.Helper()
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(tb.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(func() {
+		closeQuietly(listener)
+	})
+
+	server := &echoH2CServer{addr: listener.Addr().String()}
+	h2Server := &http2.Server{}
+	handler := http.HandlerFunc(echoH2CHandler)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			server.live.Add(1)
+			tracked := &trackedServerConn{Conn: conn, live: &server.live}
+			go h2Server.ServeConn(tracked, &http2.ServeConnOpts{Handler: handler})
+		}
+	}()
+	return server
+}
+
+func echoH2CHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	flusher, canFlush := w.(http.Flusher)
+	if canFlush {
+		flusher.Flush()
+	}
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				return
+			}
+			if canFlush {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// trackedServerConn decrements live exactly once, when the server side of the
+// connection is torn down.
+type trackedServerConn struct {
+	net.Conn
+	live      *atomic.Int64
+	closeOnce sync.Once
+}
+
+func (c *trackedServerConn) Close() error {
+	c.closeOnce.Do(func() {
+		c.live.Add(-1)
+	})
+	return c.Conn.Close()
+}
+
+type fakeStreamConn struct {
+	net.Conn
+	closed atomic.Bool
+}
+
+func (c *fakeStreamConn) Close() error {
+	c.closed.Store(true)
+	return nil
+}
+
+func (c *fakeStreamConn) isClosed() bool {
+	return c.closed.Load()
 }
 
 func TestHTTPStreamCloseDoesNotWaitForResponse(t *testing.T) {

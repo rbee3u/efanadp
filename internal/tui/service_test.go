@@ -84,15 +84,17 @@ func TestStartNodeLeavesConnectionEventsOpenAfterStop(t *testing.T) {
 		t.Fatalf("service returned %v", done.err)
 	}
 
+	// Connection handlers can outlive the listener, so a late push must stay
+	// safe and must still be delivered rather than discarded.
 	defer func() {
 		if r := recover(); r != nil {
-			t.Fatalf("connection events channel was closed after stop: %v", r)
+			t.Fatalf("connection event queue rejected a late event after stop: %v", r)
 		}
 	}()
-	select {
-	case events <- proxy.Event{}:
-	default:
-		t.Fatal("connection events channel should accept a late event after stop")
+	events.push(proxy.Event{ID: 1, Type: proxy.ConnectionClosed})
+	late := events.take()
+	if len(late) != 1 {
+		t.Fatalf("late events queued=%d, want 1", len(late))
 	}
 }
 
@@ -110,7 +112,7 @@ func TestServerConfigPassesShadowsocksSniffConfigs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := model.serverConfig(testNode(), userID, make(chan proxy.Event, 1))
+	cfg := model.serverConfig(testNode(), userID, newConnectionQueue())
 	if len(cfg.ShadowsocksSniffConfigs) != 1 {
 		t.Fatalf("len(sniff configs)=%d, want 1", len(cfg.ShadowsocksSniffConfigs))
 	}

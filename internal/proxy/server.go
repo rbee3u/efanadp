@@ -9,8 +9,10 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/rbee3u/efanadp/internal/human"
 	"github.com/rbee3u/efanadp/internal/x365"
 )
 
@@ -30,7 +32,20 @@ type Config struct {
 	ShadowsocksSniffConfigs []x365.ShadowsocksSniffConfig
 	Logger                  Logger
 	OnConnection            func(Event)
-	listenUDP               func(*net.UDPAddr) (udpPacketConn, error)
+
+	// UDPTargetIdleTimeout bounds how long an unused UDP destination keeps its
+	// upstream stream cached. Zero selects DefaultUDPTargetIdleTimeout; a
+	// negative value disables expiry.
+	UDPTargetIdleTimeout time.Duration
+
+	listenUDP func(*net.UDPAddr) (udpPacketConn, error)
+}
+
+func (cfg Config) udpTargetIdleTimeout() time.Duration {
+	if cfg.UDPTargetIdleTimeout == 0 {
+		return DefaultUDPTargetIdleTimeout
+	}
+	return cfg.UDPTargetIdleTimeout
 }
 
 func ServeSOCKS(ctx context.Context, listen string, cfg Config) error {
@@ -65,12 +80,33 @@ func serveSOCKS(ctx context.Context, ln net.Listener, cfg Config) error {
 
 var errAcceptLoopClosed = errors.New("accept loop closed")
 
+// Accept retry pacing after a recoverable failure: short enough that the proxy
+// resumes as soon as capacity frees up, capped so a persistent shortage does not
+// spin.
+const (
+	acceptRetryDelayMin = 5 * time.Millisecond
+	acceptRetryDelayMax = time.Second
+)
+
 func acceptSOCKSConnections(ctx context.Context, ln net.Listener, cfg Config, handlers *sync.WaitGroup) error {
+	var retryDelay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			return acceptLoopError(ctx, err)
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return errAcceptLoopClosed
+			}
+			if !isRecoverableAcceptError(err) {
+				return err
+			}
+			retryDelay = nextAcceptRetryDelay(retryDelay)
+			cfg.warnf("[efanadp] accept failed, retrying in %s: %v", human.ShortDuration(retryDelay), err)
+			if !waitBeforeAcceptRetry(ctx, retryDelay) {
+				return errAcceptLoopClosed
+			}
+			continue
 		}
+		retryDelay = 0
 		handlers.Go(func() {
 			if err := handleSOCKSConn(ctx, conn, cfg); err != nil {
 				if isBenignClientError(err) {
@@ -82,11 +118,38 @@ func acceptSOCKSConnections(ctx context.Context, ln net.Listener, cfg Config, ha
 	}
 }
 
-func acceptLoopError(ctx context.Context, err error) error {
-	if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-		return errAcceptLoopClosed
+// isRecoverableAcceptError reports whether the accept loop should keep serving.
+//
+// Descriptor and buffer exhaustion is the realistic failure here, because every
+// proxied connection holds an upstream socket and every cached UDP destination
+// holds another, so a busy client can push the process to its limit while the
+// listener itself stays healthy. Returning the error instead would stop the
+// whole SOCKS service over a shortage that clears on its own as connections
+// close, leaving the user to notice and restart it.
+func isRecoverableAcceptError(err error) bool {
+	return errors.Is(err, syscall.EMFILE) ||
+		errors.Is(err, syscall.ENFILE) ||
+		errors.Is(err, syscall.ENOBUFS) ||
+		errors.Is(err, syscall.ENOMEM)
+}
+
+func nextAcceptRetryDelay(current time.Duration) time.Duration {
+	if current <= 0 {
+		return acceptRetryDelayMin
 	}
-	return err
+	return min(2*current, acceptRetryDelayMax)
+}
+
+// waitBeforeAcceptRetry reports false when the service stopped while waiting.
+func waitBeforeAcceptRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func handleSOCKSConn(ctx context.Context, client net.Conn, cfg Config) error {

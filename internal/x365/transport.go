@@ -35,16 +35,58 @@ func openXHTTPRealityStream(ctx context.Context, node Node, timeout time.Duratio
 		return nil, err
 	}
 
-	transport := newXHTTPRealityTransport(node, timeout, realityConfig)
+	conns := &streamConns{}
+	transport := newXHTTPRealityTransport(node, timeout, realityConfig, conns)
 	stream := &httpStream{
 		requestWriter: pw,
 		responseDone:  make(chan struct{}),
 		cancel:        cancel,
-		closeIdle:     transport.CloseIdleConnections,
+		closeConns:    conns.closeAll,
 	}
 	stream.startResponse(transport, req, pr)
 
 	return stream, nil
+}
+
+// streamConns records the TCP connections a per-stream transport dials, so
+// closing the stream deterministically closes the socket underneath it.
+//
+// http2.Transport.CloseIdleConnections cannot do that job here. The h2 stream is
+// forgotten asynchronously, by the goroutine running RoundTrip, so a
+// CloseIdleConnections call issued from Close almost always runs while the
+// connection still looks busy and leaves it parked in the pool. Each stream owns
+// a fresh transport whose IdleConnTimeout is unset, so nothing ever revisits
+// that pool: the connection, its REALITY session, and the h2 read loop would
+// survive for the rest of the process. One proxied connection leaked one socket.
+type streamConns struct {
+	mu     sync.Mutex
+	conns  []net.Conn
+	closed bool
+}
+
+// adopt records conn, or closes it right away when the stream is already gone.
+// http2 may dial more than once for a single request, so every conn is kept.
+func (s *streamConns) adopt(conn net.Conn) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		closeQuietly(conn)
+		return
+	}
+	s.conns = append(s.conns, conn)
+	s.mu.Unlock()
+}
+
+func (s *streamConns) closeAll() {
+	s.mu.Lock()
+	s.closed = true
+	conns := s.conns
+	s.conns = nil
+	s.mu.Unlock()
+
+	for _, conn := range conns {
+		closeQuietly(conn)
+	}
 }
 
 func newXHTTPRealityRequest(ctx context.Context, node Node, body io.Reader) (*http.Request, error) {
@@ -75,6 +117,7 @@ func newXHTTPRealityTransport(
 	node Node,
 	timeout time.Duration,
 	realityConfig *realityClientConfig,
+	conns *streamConns,
 ) *http2.Transport {
 	return &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
@@ -91,6 +134,7 @@ func newXHTTPRealityTransport(
 				closeQuietly(raw)
 				return nil, fmt.Errorf("reality handshake: %w", err)
 			}
+			conns.adopt(conn)
 			return conn, nil
 		},
 	}
@@ -120,7 +164,7 @@ type httpStream struct {
 	requestWriter *io.PipeWriter
 	responseDone  chan struct{}
 	cancel        context.CancelFunc
-	closeIdle     func()
+	closeConns    func()
 
 	mu        sync.Mutex
 	closeOnce sync.Once
@@ -160,8 +204,11 @@ func (s *httpStream) Close() error {
 		if body != nil {
 			closeQuietly(body)
 		}
-		if s.closeIdle != nil {
-			s.closeIdle()
+		// Cancelling and closing the body lets h2 shut the stream down on its
+		// own terms; closing the socket afterwards is what guarantees the
+		// connection and its read loop actually go away.
+		if s.closeConns != nil {
+			s.closeConns()
 		}
 	})
 	return nil

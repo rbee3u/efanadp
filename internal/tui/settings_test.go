@@ -51,6 +51,40 @@ func TestSaveSettingsFailureShowsWarning(t *testing.T) {
 	}
 }
 
+func TestSaveSettingsFailureWarnsAfterStatusWasCleared(t *testing.T) {
+	settingsPath := t.TempDir()
+	model := newTestModel(Options{})
+	model.config.settingsPath = settingsPath
+	model.config.configPath = "proxy.yaml"
+	// A cleared error leaves statusKind behind; the warning is still the only
+	// thing the user can see, so it has to be shown.
+	model.setStatus(statusError, "Service exited")
+	model.clearStatus()
+
+	model.saveSettingsLogged()
+
+	if model.statusKind != statusWarning {
+		t.Fatalf("status kind=%v, want warning", model.statusKind)
+	}
+	if !strings.Contains(model.status, "Failed to save settings") {
+		t.Fatalf("status=%q, want settings save warning", model.status)
+	}
+}
+
+func TestSaveSettingsFailureKeepsVisibleError(t *testing.T) {
+	settingsPath := t.TempDir()
+	model := newTestModel(Options{})
+	model.config.settingsPath = settingsPath
+	model.config.configPath = "proxy.yaml"
+	model.setStatus(statusError, "Service exited: boom")
+
+	model.saveSettingsLogged()
+
+	if model.status != "Service exited: boom" {
+		t.Fatalf("status=%q, want the visible error kept", model.status)
+	}
+}
+
 func TestResolveConfigPathPrecedence(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -100,7 +100,7 @@ func newModel(startup startupConfig, deps modelDeps) *Model {
 		if node, ok := model.selectNodeByName(model.rememberedNodeName); ok {
 			model.setStatus(statusSuccess, "Restored previous node: "+node.Name)
 			model.startupNode = &node
-		} else if startup.settingsErr == nil {
+		} else {
 			model.setStatus(statusWarning, fmt.Sprintf("Loaded %d nodes; previous node %q is not in this config", len(model.nodes), model.rememberedNodeName))
 			model.rememberedNodeName = ""
 		}

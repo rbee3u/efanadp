@@ -20,7 +20,9 @@ func openX365Multipath(
 	if err != nil {
 		return nil, fmt.Errorf("open xhttp reality stream: %w", err)
 	}
-	conn, err := openMultipath(stream, userID, destHost, destPort)
+	conn, err := handshakeWithDeadline(ctx, timeout, stream, func() (io.ReadWriteCloser, error) {
+		return openMultipath(stream, userID, destHost, destPort)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open multipath stream: %w", err)
 	}
@@ -62,7 +64,7 @@ func openMultipath(
 		return nil, fmt.Errorf("write multipath hello: %w", err)
 	}
 	opened = true
-	return &multipathConn{stream: stream, framer: framer}, nil
+	return newMultipathConn(stream, framer), nil
 }
 
 type multipathConn struct {
@@ -72,9 +74,21 @@ type multipathConn struct {
 	writeMu   sync.Mutex
 	closeOnce sync.Once
 	closeErr  error
+
+	acks *ackQueue
 }
 
 var _ io.ReadWriteCloser = (*multipathConn)(nil)
+
+func newMultipathConn(stream io.ReadWriteCloser, framer *multipathFramer) *multipathConn {
+	conn := &multipathConn{
+		stream: stream,
+		framer: framer,
+		acks:   newACKQueue(),
+	}
+	go conn.acks.run(conn.flushACK)
+	return conn
+}
 
 func (c *multipathConn) Read(p []byte) (int, error) {
 	for len(c.readBuf) == 0 {
@@ -128,18 +142,14 @@ func (c *multipathConn) Close() error {
 			frame := c.framer.closeFrameHeader()
 			_ = c.writeFrameLocked(frame[:])
 			c.writeMu.Unlock()
-			c.closeErr = c.stream.Close()
-			return
 		}
+		// Close the stream before stopping the ACK sender: that releases a write
+		// blocked in the flow-control window, which is what lets a send already
+		// waiting on the write lock finish and the sender goroutine return.
 		c.closeErr = c.stream.Close()
+		c.acks.stop()
 	})
 	return c.closeErr
-}
-
-func (c *multipathConn) writeFrame(frame []byte) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return c.writeFrameLocked(frame)
 }
 
 func (c *multipathConn) writeFrameLocked(frame []byte) error {
@@ -181,9 +191,37 @@ func (c *multipathConn) readDataFramePayload(seq uint64, payloadLen int, dst []b
 	return directLen, nil
 }
 
+// ackDataFrame acknowledges everything received up to seq without ever waiting
+// for the frame write lock. The common case is an idle write path, so the ACK
+// still goes out inline; a contended one is left for the sender goroutine. See
+// ackQueue for why a Read must not block here.
 func (c *multipathConn) ackDataFrame(seq uint64) {
+	c.acks.offer(seq)
+	if !c.writeMu.TryLock() {
+		c.acks.wake()
+		return
+	}
+	// A failed ACK write means the stream is finished, and the relay tears the
+	// connection down on its own read or write error; there is nothing to retry.
+	_ = c.flushACKLocked()
+	c.writeMu.Unlock()
+}
+
+func (c *multipathConn) flushACK() error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.flushACKLocked()
+}
+
+// flushACKLocked writes the queued sequence, if any. Taking and writing under
+// the same lock keeps two flushers from reordering their ACKs on the wire.
+func (c *multipathConn) flushACKLocked() error {
+	seq, ok := c.acks.take()
+	if !ok {
+		return nil
+	}
 	ack := ackFrameHeader(seq)
-	_ = c.writeFrame(ack[:])
+	return c.writeFrameLocked(ack[:])
 }
 
 func (c *multipathConn) readBuffered(p []byte) int {

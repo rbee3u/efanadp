@@ -64,10 +64,20 @@ func (m *Model) saveSettings() error {
 func (m *Model) saveSettingsLogged() {
 	if err := m.saveSettings(); err != nil {
 		m.logWarnf("[efanadp] save settings failed path=%s err=%v", m.config.settingsPath, err)
-		if m.statusKind != statusError && m.statusKind != statusWarning {
+		if m.canShowSettingsWarning() {
 			m.setStatus(statusWarning, "Failed to save settings; next launch may not restore automatically: "+shortError(err))
 		}
 	}
+}
+
+// canShowSettingsWarning keeps this warning from displacing a problem the user
+// has not seen yet. statusKind keeps its last value after clearStatus, so an
+// empty status means nothing is on screen to preserve.
+func (m *Model) canShowSettingsWarning() bool {
+	if m.status == "" {
+		return true
+	}
+	return m.statusKind != statusError && m.statusKind != statusWarning
 }
 
 func shortError(err error) string {

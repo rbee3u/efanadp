@@ -129,7 +129,8 @@ func TestMultipathConnReadDirectDataFrameAndACKs(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream := &memoryStream{read: *bytes.NewBuffer(frameBytes)}
-	conn := &multipathConn{stream: stream, framer: &multipathFramer{}}
+	conn := newMultipathConn(stream, &multipathFramer{})
+	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 5)
 	n, err := conn.Read(buf)
@@ -151,7 +152,8 @@ func TestMultipathConnReadBuffersPayloadRemainderAndACKsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream := &memoryStream{read: *bytes.NewBuffer(frameBytes)}
-	conn := &multipathConn{stream: stream, framer: &multipathFramer{}}
+	conn := newMultipathConn(stream, &multipathFramer{})
+	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 2)
 	n, err := conn.Read(buf)
@@ -180,7 +182,8 @@ func TestMultipathConnReadLargeFrameBuffersOnlyRemainder(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream := &memoryStream{read: *bytes.NewBuffer(frameBytes)}
-	conn := &multipathConn{stream: stream, framer: &multipathFramer{}}
+	conn := newMultipathConn(stream, &multipathFramer{})
+	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 64*1024)
 	n, err := conn.Read(buf)
@@ -203,7 +206,8 @@ func TestMultipathConnReadLargeFrameEOFInRemainderDoesNotACK(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream := &memoryStream{read: *bytes.NewBuffer(frameBytes[:frameHeaderSize+3])}
-	conn := &multipathConn{stream: stream, framer: &multipathFramer{}}
+	conn := newMultipathConn(stream, &multipathFramer{})
+	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 2)
 	n, err := conn.Read(buf)
@@ -223,7 +227,7 @@ func TestMultipathConnReadLargeFrameEOFInRemainderDoesNotACK(t *testing.T) {
 
 func TestMultipathConnCloseIsIdempotent(t *testing.T) {
 	stream := &memoryStream{}
-	conn := &multipathConn{stream: stream, framer: &multipathFramer{}}
+	conn := newMultipathConn(stream, &multipathFramer{})
 
 	if err := conn.Close(); err != nil {
 		t.Fatal(err)
@@ -249,7 +253,7 @@ func TestMultipathConnCloseIsIdempotent(t *testing.T) {
 
 func TestMultipathConnCloseUnblocksActiveWrite(t *testing.T) {
 	stream := newBlockingWriteStream()
-	conn := &multipathConn{stream: stream, framer: &multipathFramer{}}
+	conn := newMultipathConn(stream, &multipathFramer{})
 
 	writeDone := make(chan error, 1)
 	go func() {
@@ -268,6 +272,66 @@ func TestMultipathConnCloseUnblocksActiveWrite(t *testing.T) {
 	if err := receiveWithin(t, writeDone, "blocked multipath write release"); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("write err=%v, want closed pipe", err)
 	}
+}
+
+// TestMultipathConnReadDoesNotWaitForStalledWrite covers the deadlock the ACK
+// queue exists to prevent: a data frame write parked in the upstream
+// flow-control window must not stop the read side from delivering downloads.
+func TestMultipathConnReadDoesNotWaitForStalledWrite(t *testing.T) {
+	frameBytes, err := buildFrame(frameData, 7, []byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := newStalledWriteStream(frameBytes)
+	conn := newMultipathConn(stream, &multipathFramer{})
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := conn.Write([]byte("upload payload"))
+		writeDone <- err
+	}()
+	receiveWithin(t, stream.writeStarted, "stalled multipath write")
+
+	readDone := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 5)
+		n, readErr := conn.Read(buf)
+		if readErr != nil {
+			readDone <- "error: " + readErr.Error()
+			return
+		}
+		readDone <- string(buf[:n])
+	}()
+	if got := receiveWithin(t, readDone, "read while the write path is stalled"); got != "hello" {
+		t.Fatalf("read %q, want hello", got)
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiveWithin(t, writeDone, "stalled write release"); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("write err=%v, want closed pipe", err)
+	}
+}
+
+// TestMultipathConnQueuedACKIsWrittenAfterWriteUnblocks shows a contended ACK is
+// deferred rather than dropped: once the busy frame write lock frees, the sender
+// goroutine writes the coalesced sequence, and only that newest one.
+func TestMultipathConnQueuedACKIsWrittenAfterWriteUnblocks(t *testing.T) {
+	stream := newRecordingStream()
+	conn := newMultipathConn(stream, &multipathFramer{})
+	defer func() { _ = conn.Close() }()
+
+	// Holding the lock is what a write stalled in the flow-control window does.
+	conn.writeMu.Lock()
+	conn.ackDataFrame(11)
+	conn.ackDataFrame(12)
+	if written := stream.written(); len(written) != 0 {
+		t.Fatalf("wrote %d bytes while the write lock was held, want none", len(written))
+	}
+	conn.writeMu.Unlock()
+
+	assertSingleACKFrame(t, receiveWithin(t, stream.writes, "queued ACK frame"), 12)
 }
 
 func assertSingleACKFrame(t *testing.T, data []byte, wantSeq uint64) {
@@ -306,10 +370,8 @@ func BenchmarkReadFrame(b *testing.B) {
 
 func BenchmarkMultipathConnWrite(b *testing.B) {
 	payload := bytes.Repeat([]byte("x"), 16*1024)
-	conn := &multipathConn{
-		stream: discardStream{},
-		framer: &multipathFramer{},
-	}
+	conn := newMultipathConn(discardStream{}, &multipathFramer{})
+	defer func() { _ = conn.Close() }()
 
 	b.ReportAllocs()
 	for b.Loop() {
@@ -336,10 +398,7 @@ func BenchmarkMultipathConnReadLargeFrameSmallBuffer(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		reader.Reset(frameBytes)
-		conn := &multipathConn{
-			stream: stream,
-			framer: &multipathFramer{},
-		}
+		conn := newMultipathConn(stream, &multipathFramer{})
 		n, err := conn.Read(buf)
 		if err != nil {
 			b.Fatal(err)
@@ -349,6 +408,9 @@ func BenchmarkMultipathConnReadLargeFrameSmallBuffer(b *testing.B) {
 		}
 		if len(conn.readBuf) != len(payload)-len(buf) {
 			b.Fatalf("buffered %d bytes, want %d", len(conn.readBuf), len(payload)-len(buf))
+		}
+		if err := conn.Close(); err != nil {
+			b.Fatal(err)
 		}
 	}
 }
@@ -453,4 +515,84 @@ func (s *blockingWriteStream) Close() error {
 		close(s.closed)
 	})
 	return nil
+}
+
+// stalledWriteStream stands in for an upstream whose flow-control window is
+// full: writes park until Close, while reads keep delivering frames.
+type stalledWriteStream struct {
+	writeStarted chan struct{}
+	closed       chan struct{}
+	writeOnce    sync.Once
+	closeOnce    sync.Once
+
+	mu   sync.Mutex
+	read *bytes.Reader
+}
+
+func newStalledWriteStream(readable []byte) *stalledWriteStream {
+	return &stalledWriteStream{
+		writeStarted: make(chan struct{}),
+		closed:       make(chan struct{}),
+		read:         bytes.NewReader(readable),
+	}
+}
+
+func (s *stalledWriteStream) Read(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.read.Read(p)
+}
+
+func (s *stalledWriteStream) Write([]byte) (int, error) {
+	s.writeOnce.Do(func() {
+		close(s.writeStarted)
+	})
+	<-s.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (s *stalledWriteStream) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.closed)
+	})
+	return nil
+}
+
+// recordingStream reports each write on a channel so a test can wait for one
+// that another goroutine produces.
+type recordingStream struct {
+	writes chan []byte
+
+	mu    sync.Mutex
+	bytes []byte
+}
+
+func newRecordingStream() *recordingStream {
+	return &recordingStream{writes: make(chan []byte, 8)}
+}
+
+func (s *recordingStream) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (s *recordingStream) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	s.bytes = append(s.bytes, p...)
+	s.mu.Unlock()
+
+	select {
+	case s.writes <- append([]byte(nil), p...):
+	default:
+	}
+	return len(p), nil
+}
+
+func (s *recordingStream) Close() error {
+	return nil
+}
+
+func (s *recordingStream) written() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.bytes...)
 }

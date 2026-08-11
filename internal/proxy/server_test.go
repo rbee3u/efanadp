@@ -3,12 +3,14 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -52,6 +54,79 @@ func TestServeSOCKSUsesConfiguredLogger(t *testing.T) {
 	cancel()
 	if err := receiveWithin(t, errCh, "SOCKS server shutdown"); err != nil {
 		t.Fatalf("serveSOCKS returned %v", err)
+	}
+}
+
+func TestServeSOCKSKeepsServingAfterDescriptorExhaustion(t *testing.T) {
+	ln := newPipeListener()
+	ln.failNextAccepts(&net.OpError{Op: "accept", Err: syscall.EMFILE}, 3)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	warnCh := make(chan string, 8)
+	errCh := make(chan error, 1)
+	cfg := Config{
+		Logger: testLogger{log: func(_ string, format string, args ...any) {
+			msg := fmt.Sprintf(format, args...)
+			if strings.Contains(msg, "accept failed") {
+				select {
+				case warnCh <- msg:
+				default:
+				}
+			}
+		}},
+	}
+
+	go func() {
+		errCh <- serveSOCKS(ctx, ln, cfg)
+	}()
+
+	msg := receiveWithin(t, warnCh, "accept retry warning")
+	if !strings.Contains(msg, "retrying in") {
+		t.Fatalf("warning %q does not report a retry delay", msg)
+	}
+
+	// The listener has to still be accepting once the shortage clears.
+	conn, err := ln.Dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte{5, 1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatalf("handshake after accept retry: %v", err)
+	}
+	if reply[0] != 5 || reply[1] != 0 {
+		t.Fatalf("handshake reply=%v, want no-auth accepted", reply)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cancel()
+	if err := receiveWithin(t, errCh, "SOCKS server shutdown"); err != nil {
+		t.Fatalf("serveSOCKS returned %v", err)
+	}
+}
+
+func TestServeSOCKSReturnsUnrecoverableAcceptError(t *testing.T) {
+	ln := newPipeListener()
+	acceptErr := &net.OpError{Op: "accept", Err: syscall.EINVAL}
+	ln.failNextAccepts(acceptErr, 1)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- serveSOCKS(ctx, ln, Config{})
+	}()
+
+	if err := receiveWithin(t, errCh, "accept failure"); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("serveSOCKS returned %v, want EINVAL", err)
 	}
 }
 
@@ -320,6 +395,7 @@ func (l testLogger) write(level string, format string, args ...any) {
 
 type pipeListener struct {
 	conns     chan net.Conn
+	errs      chan error
 	closed    chan struct{}
 	closeOnce sync.Once
 }
@@ -327,6 +403,7 @@ type pipeListener struct {
 func newPipeListener() *pipeListener {
 	return &pipeListener{
 		conns:  make(chan net.Conn, 1),
+		errs:   make(chan error, 16),
 		closed: make(chan struct{}),
 	}
 }
@@ -338,10 +415,24 @@ func (l *pipeListener) Accept() (net.Conn, error) {
 	default:
 	}
 	select {
+	case err := <-l.errs:
+		return nil, err
+	default:
+	}
+	select {
 	case conn := <-l.conns:
 		return conn, nil
+	case err := <-l.errs:
+		return nil, err
 	case <-l.closed:
 		return nil, net.ErrClosed
+	}
+}
+
+// failNextAccepts makes the next count Accept calls return err.
+func (l *pipeListener) failNextAccepts(err error, count int) {
+	for range count {
+		l.errs <- err
 	}
 }
 

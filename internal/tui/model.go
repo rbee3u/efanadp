@@ -78,7 +78,9 @@ func (m *Model) handleGlobalMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		if m.service == nil || msg.serviceID != m.service.id {
 			return m, nil, true
 		}
-		m.connections.apply(msg.event)
+		for _, event := range msg.events {
+			m.connections.apply(event)
+		}
 		return m, waitConnectionEvent(msg.serviceID, m.service.connectionEvents, m.service.eventsDone), true
 
 	case runningTickMsg:

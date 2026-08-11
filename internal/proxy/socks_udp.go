@@ -35,6 +35,11 @@ func parseSocksUDPDatagram(packet []byte) (socksUDPDatagram, error) {
 		}
 		hostLen := int(packet[offset])
 		offset++
+		// An empty name would otherwise open an upstream stream to no
+		// destination, the same way socksReadRequest rejects it for TCP.
+		if hostLen == 0 {
+			return socksUDPDatagram{}, errors.New("empty SOCKS5 UDP domain")
+		}
 		if len(packet) < offset+hostLen+2 {
 			return socksUDPDatagram{}, fmt.Errorf("SOCKS5 UDP domain packet too short: %d", len(packet))
 		}

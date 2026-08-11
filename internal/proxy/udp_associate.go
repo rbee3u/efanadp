@@ -8,6 +8,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rbee3u/efanadp/internal/x365"
 )
@@ -30,6 +31,7 @@ func handleSOCKSUDPAssociate(
 ) error {
 	udpConn, err := cfg.bindUDP(udpBindAddrForClient(client))
 	if err != nil {
+		cfg.warnf("[udp] bind relay socket failed source=%s err=%v", client.RemoteAddr(), err)
 		writeSOCKSReplyQuietly(client, 5)
 		return nil
 	}
@@ -51,6 +53,8 @@ func handleSOCKSUDPAssociate(
 	assoc := newUDPAssociation(assocCtx.Done(), cfg, udpConn, tracker)
 	defer assoc.close()
 
+	go assoc.sweepIdleTargets(assocCtx, cfg.udpTargetIdleTimeout())
+
 	relayErr = assoc.relay(assocCtx, cancel, client, reader)
 
 	return nil
@@ -63,11 +67,16 @@ type udpAssociation struct {
 	tracker *connectionTracker
 	stats   *Stats
 
-	mu          sync.Mutex
-	clientAddr  *net.UDPAddr
-	targets     map[string]*udpTarget
-	seenTargets map[string]struct{}
-	isClosed    bool
+	// clientAddr is the pinned association client. It is written once, by the
+	// first valid datagram, and read by every target relay goroutine, so it is
+	// atomic and the pointed-to address is never mutated afterwards.
+	clientAddr atomic.Pointer[net.UDPAddr]
+
+	mu                sync.Mutex
+	targets           map[string]*udpTarget
+	seenTargets       map[string]struct{}
+	isClosed          bool
+	warnedForeignAddr bool
 
 	targetGroup sync.WaitGroup
 	closeOnce   sync.Once
@@ -175,7 +184,9 @@ func (a *udpAssociation) shouldDropClientDatagram(datagram socksUDPDatagram) boo
 
 func (a *udpAssociation) forwardClientPacket(ctx context.Context, packet udpClientPacket) error {
 	datagram := packet.datagram
-	a.setClientAddr(packet.addr)
+	if !a.adoptClientAddr(packet.addr) {
+		return nil
+	}
 	target, opened, err := a.getTarget(ctx, datagram.Host, datagram.Port)
 	if err != nil {
 		if a.shouldStopRelay(err) {
@@ -217,23 +228,51 @@ func (a *udpAssociation) isContextDone() bool {
 	}
 }
 
-func (a *udpAssociation) setClientAddr(addr *net.UDPAddr) {
+// adoptClientAddr pins the association to the first source that sends a valid
+// datagram and reports whether addr is that source. RFC 1928 scopes a
+// UDP_ASSOCIATE relay to the client that created it, so datagrams from any
+// other local source are dropped instead of being forwarded; without this, the
+// most recent sender would also capture every inbound response.
+func (a *udpAssociation) adoptClientAddr(addr *net.UDPAddr) bool {
+	// The steady state is an already-pinned client sending another datagram, so
+	// that path compares without copying.
+	pinned := a.clientAddr.Load()
+	if pinned == nil {
+		// ReadFromUDP reuses its buffer, so the address must be copied before
+		// it is retained.
+		copied := *addr
+		copied.IP = slices.Clone(addr.IP)
+		if a.clientAddr.CompareAndSwap(nil, &copied) {
+			return true
+		}
+		pinned = a.clientAddr.Load()
+	}
+	if sameUDPAddr(pinned, addr) {
+		return true
+	}
+
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	copied := *addr
-	copied.IP = slices.Clone(addr.IP)
-	a.clientAddr = &copied
+	warnOnce := !a.warnedForeignAddr
+	a.warnedForeignAddr = true
+	a.mu.Unlock()
+
+	if warnOnce {
+		a.cfg.warnf("[udp] drop datagram from=%s reason=not-associated-client client=%s", addr, pinned)
+	}
+	return false
 }
 
-func (a *udpAssociation) getClientAddr() *net.UDPAddr {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.clientAddr == nil {
-		return nil
+func sameUDPAddr(left, right *net.UDPAddr) bool {
+	if left == nil || right == nil {
+		return left == right
 	}
-	copied := *a.clientAddr
-	copied.IP = slices.Clone(a.clientAddr.IP)
-	return &copied
+	return left.Port == right.Port && left.Zone == right.Zone && left.IP.Equal(right.IP)
+}
+
+// getClientAddr returns the pinned client address, or nil before one is pinned.
+// The result is shared and must not be mutated; WriteToUDP only reads it.
+func (a *udpAssociation) getClientAddr() *net.UDPAddr {
+	return a.clientAddr.Load()
 }
 
 func udpBindAddrForClient(client net.Conn) *net.UDPAddr {

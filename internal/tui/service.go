@@ -18,7 +18,7 @@ type runningService struct {
 	cancel           context.CancelFunc
 	node             x365.Node
 	listen           string
-	connectionEvents chan proxy.Event
+	connectionEvents *connectionQueue
 	eventsDone       <-chan struct{}
 }
 
@@ -56,7 +56,7 @@ func (m *Model) startService(start pendingStart) tea.Cmd {
 	m.nextServiceID++
 	listen := m.config.loaded.Listen
 	done := make(chan serviceStoppedMsg, 1)
-	events := make(chan proxy.Event, 128)
+	events := newConnectionQueue()
 	stopped := make(chan struct{})
 	service := &runningService{
 		id:               id,
@@ -73,9 +73,9 @@ func (m *Model) startService(start pendingStart) tea.Cmd {
 	serveSOCKS := m.deps.serveSOCKS
 	go func() {
 		err := serveSOCKS(ctx, service.listen, cfg)
-		// The service goroutine owns stopped/done. It intentionally does not
-		// close connectionEvents: connection handlers may emit after the listener
-		// stops, and serverConfig drops late events with a non-blocking send.
+		// The service goroutine owns stopped/done. connectionEvents has no
+		// close: connection handlers may emit after the listener stops, and
+		// pushing to the queue stays safe for the whole process lifetime.
 		close(stopped)
 		done <- serviceStoppedMsg{id: service.id, nodeName: service.node.Name, err: err}
 	}()
@@ -87,19 +87,14 @@ func (m *Model) startService(start pendingStart) tea.Cmd {
 	)
 }
 
-func (m *Model) serverConfig(node x365.Node, userID x365.UserID, events chan<- proxy.Event) proxy.Config {
+func (m *Model) serverConfig(node x365.Node, userID x365.UserID, events *connectionQueue) proxy.Config {
 	upstream := x365.NewClient(node, userID, m.config.timeout)
 	return proxy.Config{
 		Upstream:                upstream,
 		HandshakeTimeout:        m.config.handshakeTimeout,
 		ShadowsocksSniffConfigs: m.config.loaded.ShadowsocksSniffConfigs,
 		Logger:                  m.deps.logger,
-		OnConnection: func(event proxy.Event) {
-			select {
-			case events <- event:
-			default:
-			}
-		},
+		OnConnection:            events.push,
 	}
 }
 
@@ -178,18 +173,32 @@ func waitServiceStopped(done <-chan serviceStoppedMsg) tea.Cmd {
 	}
 }
 
-func waitConnectionEvent(serviceID int, events <-chan proxy.Event, stopped <-chan struct{}) tea.Cmd {
+// waitConnectionEvent waits for queued connection events and delivers the whole
+// backlog in one message, so a burst costs one render instead of one per event.
+// It returns nil once the service has stopped and drained, which ends the
+// re-arm loop in handleGlobalMsg.
+func waitConnectionEvent(serviceID int, events *connectionQueue, stopped <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
-		select {
-		case event, ok := <-events:
-			if !ok {
-				return nil
+		for {
+			if batch := events.take(); batch != nil {
+				return connectionEventMsg{serviceID: serviceID, events: batch}
 			}
-			return connectionEventMsg{serviceID: serviceID, event: event}
-		case <-stopped:
-			return nil
+			select {
+			case <-events.signal:
+			case <-stopped:
+				// Late events from handlers outliving the listener are still
+				// worth applying; only stop once nothing is left.
+				return takeFinalConnectionEvents(serviceID, events)
+			}
 		}
 	}
+}
+
+func takeFinalConnectionEvents(serviceID int, events *connectionQueue) tea.Msg {
+	if batch := events.take(); batch != nil {
+		return connectionEventMsg{serviceID: serviceID, events: batch}
+	}
+	return nil
 }
 
 func runningTick(serviceID int) tea.Cmd {

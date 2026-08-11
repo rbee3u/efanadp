@@ -88,7 +88,10 @@ type connectionTableLayout struct {
 }
 
 func newConnectionTableLayout(rows []connectionItem, now time.Time, width int) connectionTableLayout {
-	const maxTargetWidth = 80
+	const (
+		maxConnectionIDWidth = 9
+		maxTargetWidth       = 80
+	)
 
 	availableWidth := width
 	if availableWidth <= 0 {
@@ -111,7 +114,7 @@ func newConnectionTableLayout(rows []connectionItem, now time.Time, width int) c
 		layout.downWidth = max(layout.downWidth, lipgloss.Width(human.FormatBytes(conn.downloadBytes())))
 	}
 
-	layout.idWidth = min(layout.idWidth, 6)
+	layout.idWidth = min(layout.idWidth, maxConnectionIDWidth)
 	layout.typeWidth = min(layout.typeWidth, 4)
 	layout.ageWidth = min(layout.ageWidth, 6)
 	layout.upWidth = min(layout.upWidth, 9)

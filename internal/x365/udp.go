@@ -23,7 +23,12 @@ func openX365UDP(
 	if err != nil {
 		return nil, fmt.Errorf("open xhttp reality stream: %w", err)
 	}
-	conn, err := openUDP(stream, userID, destHost, destPort)
+	// openUDP writes the request but defers the response read to the first
+	// Read, so the deadline here covers the write; a stalled response is bounded
+	// by the association's idle target sweep instead.
+	conn, err := handshakeWithDeadline(ctx, timeout, stream, func() (io.ReadWriteCloser, error) {
+		return openUDP(stream, userID, destHost, destPort)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open x365 udp stream: %w", err)
 	}

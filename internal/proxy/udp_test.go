@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestUDPAssociationCloseClosesTargetOnce(t *testing.T) {
@@ -43,7 +45,7 @@ func TestUDPAssociationCloseClosesSocketAndUnblocksTargetRelay(t *testing.T) {
 	udpConn := newCloseBlockingUDPPacketConn(t, "127.0.0.1:39000")
 	stream := newOnePacketStream([]byte("response"))
 	assoc := newUDPAssociation(t.Context().Done(), Config{}, udpConn, &connectionTracker{stats: &Stats{}})
-	assoc.setClientAddr(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 53000})
+	assoc.adoptClientAddr(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 53000})
 	target := &udpTarget{
 		key:            udpTargetKey("example.com", 53),
 		host:           "example.com",
@@ -250,6 +252,198 @@ func TestUDPAssociationDeduplicatesInnerTargetSniffUpdates(t *testing.T) {
 	if sniffLogs != 2 {
 		t.Fatalf("sniff logs=%d (%v), want one per distinct inner target", sniffLogs, logs)
 	}
+}
+
+func TestUDPAssociationPinsClientAndDropsForeignSources(t *testing.T) {
+	var logs []string
+	opens := make(chan string, 4)
+	cfg := Config{
+		Logger: testLogger{log: func(_ string, format string, args ...any) {
+			logs = append(logs, fmt.Sprintf(format, args...))
+		}},
+		Upstream: testUpstream{
+			openUDP: func(_ context.Context, host string, port int) (io.ReadWriteCloser, error) {
+				opens <- udpTargetKey(host, port)
+				return newCloseCountingStream(), nil
+			},
+		},
+	}
+	assoc := newUDPAssociation(t.Context().Done(), cfg, nil, &connectionTracker{stats: &Stats{}})
+	defer assoc.close()
+
+	client := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53000}
+	foreign := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 61000}
+	datagram := socksUDPDatagram{Host: "example.com", Port: 53, Payload: []byte("query")}
+
+	if err := assoc.forwardClientPacket(t.Context(), udpClientPacket{addr: client, datagram: datagram}); err != nil {
+		t.Fatal(err)
+	}
+	if got := receiveWithin(t, opens, "client target open"); got != "example.com:53" {
+		t.Fatalf("opened target=%s, want example.com:53", got)
+	}
+
+	// A second local process must not be relayed, and must not steal responses.
+	if err := assoc.forwardClientPacket(t.Context(), udpClientPacket{addr: foreign, datagram: datagram}); err != nil {
+		t.Fatal(err)
+	}
+	requireNoReceive(t, opens, "foreign source target open")
+	if got := assoc.getClientAddr(); got.String() != client.String() {
+		t.Fatalf("response addr=%s, want pinned client %s", got, client)
+	}
+
+	dropLogs := 0
+	for _, log := range logs {
+		if strings.Contains(log, "reason=not-associated-client") {
+			dropLogs++
+		}
+	}
+	if dropLogs != 1 {
+		t.Fatalf("foreign-source drop logs=%d (%v), want exactly one", dropLogs, logs)
+	}
+
+	// Repeat datagrams from the pinned client keep flowing on the cached target.
+	if err := assoc.forwardClientPacket(t.Context(), udpClientPacket{addr: client, datagram: datagram}); err != nil {
+		t.Fatal(err)
+	}
+	requireNoReceive(t, opens, "reopen for pinned client")
+}
+
+func TestUDPAssociationSweepClosesIdleTargets(t *testing.T) {
+	assoc := newUDPAssociation(t.Context().Done(), Config{}, nil, &connectionTracker{stats: &Stats{}})
+	idle := newCloseCountingStream()
+	fresh := newCloseCountingStream()
+	now := time.Now()
+
+	idleTarget := &udpTarget{key: "idle:53", host: "idle", port: 53, conn: idle}
+	idleTarget.touch(now.Add(-5 * time.Minute))
+	freshTarget := &udpTarget{key: "fresh:53", host: "fresh", port: 53, conn: fresh}
+	freshTarget.touch(now)
+	assoc.targets[idleTarget.key] = idleTarget
+	assoc.targets[freshTarget.key] = freshTarget
+
+	taken := assoc.takeIdleTargets(now, time.Minute)
+	if len(taken) != 1 || taken[0] != idleTarget {
+		t.Fatalf("swept targets=%+v, want only the idle target", taken)
+	}
+	if _, ok := assoc.targets[idleTarget.key]; ok {
+		t.Fatal("idle target still cached after sweep")
+	}
+	if _, ok := assoc.targets[freshTarget.key]; !ok {
+		t.Fatal("active target was swept")
+	}
+
+	assoc.close()
+	if got := fresh.closeCount.Load(); got != 1 {
+		t.Fatalf("active target close count=%d, want 1 on association close", got)
+	}
+}
+
+// A cached target must be marked active while the association lock is held, or
+// the sweep can close it between the cache lookup and the write, which silently
+// drops the datagram that reused it. Steady DNS traffic makes this the common
+// case for a long-lived resolver target.
+func TestUDPAssociationLookupKeepsTargetFromIdleSweep(t *testing.T) {
+	assoc := newUDPAssociation(t.Context().Done(), Config{}, nil, &connectionTracker{stats: &Stats{}})
+	defer assoc.close()
+
+	stream := newCloseCountingStream()
+	key := udpTargetKey("resolver.example.net", 53)
+	target := &udpTarget{key: key, host: "resolver.example.net", port: 53, conn: stream}
+	stale := time.Now().Add(-5 * time.Minute)
+	target.touch(stale)
+	assoc.targets[key] = target
+
+	found, err := assoc.lookupTarget(key)
+	if err != nil || found != target {
+		t.Fatalf("lookupTarget=%+v err=%v, want the cached target", found, err)
+	}
+	if idle := target.idleSince(time.Now()); idle > time.Second {
+		t.Fatalf("target idle=%s after a cache hit, want it marked active", idle)
+	}
+
+	if swept := assoc.takeIdleTargets(time.Now(), time.Minute); len(swept) != 0 {
+		t.Fatalf("swept %d targets, want the just-used target kept", len(swept))
+	}
+	if _, ok := assoc.targets[key]; !ok {
+		t.Fatal("target in active use was swept")
+	}
+}
+
+// openUDP defers its X365 response read to the first target read, so a rejected
+// upstream only surfaces here. Without a log the client just sees no reply.
+func TestUDPAssociationLogsTargetReadFailure(t *testing.T) {
+	var logs []string
+	readErr := errors.New("bad X365 response: deadbeef")
+	cfg := Config{Logger: testLogger{log: func(_ string, format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}}}
+	assoc := newUDPAssociation(t.Context().Done(), cfg, nil, &connectionTracker{stats: &Stats{}})
+	target := &udpTarget{
+		key:            udpTargetKey("example.org", 53),
+		host:           "example.org",
+		port:           53,
+		conn:           &readFailingStream{err: readErr},
+		responseHeader: mustSocksUDPHeader(t, "example.org", 53),
+	}
+	assoc.targets[target.key] = target
+
+	assoc.relayFromTarget(target)
+
+	if _, ok := assoc.targets[target.key]; ok {
+		t.Fatal("target still cached after a read failure")
+	}
+	found := slices.ContainsFunc(logs, func(log string) bool {
+		return strings.Contains(log, "[udp] read response") && strings.Contains(log, readErr.Error())
+	})
+	if !found {
+		t.Fatalf("logs=%v, want a read-response warning naming the upstream error", logs)
+	}
+}
+
+// Close, context teardown, and the idle sweep are all normal, so they must not
+// log an upstream failure.
+func TestUDPAssociationDoesNotLogBenignTargetReadErrors(t *testing.T) {
+	var logs []string
+	cfg := Config{Logger: testLogger{log: func(_ string, format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}}}
+	assoc := newUDPAssociation(t.Context().Done(), cfg, nil, &connectionTracker{stats: &Stats{}})
+	for _, err := range []error{net.ErrClosed, io.EOF} {
+		target := &udpTarget{
+			key:            udpTargetKey("example.net", 5353),
+			host:           "example.net",
+			port:           5353,
+			conn:           &readFailingStream{err: err},
+			responseHeader: mustSocksUDPHeader(t, "example.net", 5353),
+		}
+		assoc.targets[target.key] = target
+		assoc.relayFromTarget(target)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("logs=%v, want no warning for benign read errors", logs)
+	}
+}
+
+type readFailingStream struct {
+	err error
+}
+
+func (s *readFailingStream) Read([]byte) (int, error) { return 0, s.err }
+func (s *readFailingStream) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+func (s *readFailingStream) Close() error { return nil }
+
+func TestUDPAssociationSweepStopsWithContext(t *testing.T) {
+	assoc := newUDPAssociation(t.Context().Done(), Config{}, nil, &connectionTracker{stats: &Stats{}})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		assoc.sweepIdleTargets(ctx, time.Minute)
+		close(done)
+	}()
+	cancel()
+	receiveWithin(t, done, "idle sweeper shutdown")
 }
 
 func mustSocksUDPHeader(tb testing.TB, host string, port int) []byte {

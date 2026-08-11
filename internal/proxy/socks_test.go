@@ -328,6 +328,10 @@ func TestSOCKS5UDPDatagramRejectsBadPackets(t *testing.T) {
 			name:   "truncated domain",
 			packet: []byte{0, 0, 0, 3, 11, 'e', 'x'},
 		},
+		{
+			name:   "empty domain",
+			packet: []byte{0, 0, 0, 3, 0, 0, 53},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
