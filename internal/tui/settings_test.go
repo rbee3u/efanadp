@@ -199,6 +199,50 @@ func TestPrepareStartupUsesExplicitConfigPathOverSettings(t *testing.T) {
 	}
 }
 
+func TestPrepareStartupRejectsLogOutputOverwritingRuntimeInput(t *testing.T) {
+	tests := []struct {
+		name       string
+		configName string
+		logOutput  string
+		want       string
+	}{
+		{
+			name:       "config file",
+			configName: "proxy.yaml",
+			logOutput:  "proxy.yaml",
+			want:       "log.output resolves to the config file",
+		},
+		{
+			name:       "settings file",
+			configName: "proxy.yaml",
+			logOutput:  defaultSettingsPath,
+			want:       "log.output resolves to the settings file",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Chdir(dir)
+			configText := `
+log:
+  output: ` + tt.logOutput + `
+proxies:
+  test-node:
+    - x365://00112233-4455-6677-8899-aabbccddeeff@example.com:443?path=/x365&host=example.net&sni=example.net&pbk=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE&sid=01020304
+`
+			if err := os.WriteFile(tt.configName, []byte(configText), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := prepareStartup(Options{ConfigPath: tt.configName})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err=%v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestPrepareStartupFallsBackWhenSettingsReadFails(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)

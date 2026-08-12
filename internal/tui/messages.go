@@ -24,9 +24,9 @@ const (
 )
 
 type serviceStoppedMsg struct {
-	id       int
-	nodeName string
-	err      error
+	serviceID int
+	nodeName  string
+	err       error
 }
 
 // connectionEventMsg carries every event that was queued when the waiter woke.

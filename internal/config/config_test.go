@@ -167,6 +167,38 @@ proxies:
 	}
 }
 
+func TestParseConfigTextRejectsAdditionalYAMLDocuments(t *testing.T) {
+	_, err := parseConfigText(`
+proxies:
+  first:
+    - ` + testProxyURL("example.com", "/first") + `
+---
+proxies:
+  second:
+    - ` + testProxyURL("example.net", "/second") + `
+`)
+	if err == nil || !strings.Contains(err.Error(), "multiple YAML documents are not supported") {
+		t.Fatalf("err=%v, want multiple-document rejection", err)
+	}
+}
+
+func TestParseConfigTextRejectsPlainAndPackedProxiesTogether(t *testing.T) {
+	template := testPackedProxyTemplate(t, `
+packed:
+  - `+testProxyTemplateURL()+`
+`)
+	_, err := parseConfigText(`
+proxies:
+  plain:
+    - ` + testProxyURL("example.com", "/plain") + `
+proxies_uuid: ` + testUserID + `
+proxies_tmpl: ` + template + `
+`)
+	if err == nil || !strings.Contains(err.Error(), "proxies and proxies_tmpl cannot both be set") {
+		t.Fatalf("err=%v, want ambiguous proxy source rejection", err)
+	}
+}
+
 func TestParseConfigTextNormalizesLogConfig(t *testing.T) {
 	config, err := parseConfigText(`
 log:

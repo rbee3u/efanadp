@@ -12,7 +12,7 @@ type rawLogConfig struct {
 	Output *string `yaml:"output"`
 }
 
-func runtimeConfigFromRaw(raw rawConfig) (string, LogConfig, error) {
+func runtimeConfigFromRaw(raw rawConfig) (listen string, log LogConfig, err error) {
 	if raw.LogPath != nil {
 		return "", LogConfig{}, errors.New("log_path is no longer supported; use log.output")
 	}

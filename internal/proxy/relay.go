@@ -48,7 +48,7 @@ var relayBufferPool = sync.Pool{
 
 func copyWithPooledBuffer(dst io.Writer, src io.Reader) error {
 	bufPtr, ok := relayBufferPool.Get().(*[]byte)
-	if !ok || bufPtr == nil || len(*bufPtr) != relayBufferSize {
+	if !ok {
 		buf := make([]byte, relayBufferSize)
 		bufPtr = &buf
 	}
@@ -72,7 +72,7 @@ func writeFull(w io.Writer, p []byte) error {
 	return nil
 }
 
-func relayMultipath(
+func relayTCP(
 	ctx context.Context,
 	client net.Conn,
 	upstream io.ReadWriteCloser,

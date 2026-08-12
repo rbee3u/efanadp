@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -64,8 +66,15 @@ type rawConfig struct {
 }
 
 func readRawConfig(data []byte) (rawConfig, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	var raw rawConfig
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := decoder.Decode(&raw); err != nil && !errors.Is(err, io.EOF) {
+		return rawConfig{}, fmt.Errorf("parse YAML: %s", safeYAMLError(err))
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err == nil {
+		return rawConfig{}, errors.New("multiple YAML documents are not supported")
+	} else if !errors.Is(err, io.EOF) {
 		return rawConfig{}, fmt.Errorf("parse YAML: %s", safeYAMLError(err))
 	}
 	return raw, nil

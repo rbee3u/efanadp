@@ -20,6 +20,9 @@ var errProxyTemplateTooLarge = fmt.Errorf("proxies_tmpl exceeds %d-byte unpacked
 
 func proxyGroupsFromConfig(proxies yaml.MapSlice, encodedTemplate, uuid string) (yaml.MapSlice, error) {
 	if len(proxies) > 0 {
+		if strings.TrimSpace(encodedTemplate) != "" {
+			return nil, errors.New("proxies and proxies_tmpl cannot both be set")
+		}
 		return proxies, nil
 	}
 	return proxiesFromTemplate(encodedTemplate, uuid)

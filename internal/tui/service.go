@@ -77,7 +77,7 @@ func (m *Model) startService(start pendingStart) tea.Cmd {
 		// close: connection handlers may emit after the listener stops, and
 		// pushing to the queue stays safe for the whole process lifetime.
 		close(stopped)
-		done <- serviceStoppedMsg{id: service.id, nodeName: service.node.Name, err: err}
+		done <- serviceStoppedMsg{serviceID: service.id, nodeName: service.node.Name, err: err}
 	}()
 
 	return tea.Batch(
@@ -118,7 +118,7 @@ func (m *Model) logServiceStart(node x365.Node, listen string) {
 }
 
 func (m *Model) handleServiceStopped(msg serviceStoppedMsg) (tea.Model, tea.Cmd) {
-	if m.service == nil || msg.id != m.service.id {
+	if m.service == nil || msg.serviceID != m.service.id {
 		return m, nil
 	}
 	if m.state == stateQuitting {

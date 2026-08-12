@@ -66,11 +66,6 @@ linters:
         text: "G304: Potential file inclusion via variable"
         linters:
           - gosec
-      - path: internal/app/config_reference\.go
-        source: "^\\s*return os\\.WriteFile\\("
-        text: "G703: Path traversal via taint analysis"
-        linters:
-          - gosec
       - path: internal/x365/ss_sniff_cipher\.go
         text: "G401|G501|G505"
         linters:

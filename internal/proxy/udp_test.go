@@ -477,7 +477,7 @@ func TestUDPAssociationDeduplicatesInnerTargetSniffUpdates(t *testing.T) {
 			events <- event
 		},
 	}
-	tracker := newUDPConnectionTracker(cfg, "127.0.0.1:50000", "example.com:53")
+	tracker := newConnectionTracker(cfg, "udp", "127.0.0.1:50000", "example.com:53")
 	assoc := newUDPAssociation(t.Context().Done(), cfg, nil, tracker)
 
 	assoc.noteInnerTarget("example.com:53->inner.example:5353")
@@ -508,7 +508,7 @@ func TestUDPAssociationDeduplicatesInnerTargetSniffUpdates(t *testing.T) {
 func TestUDPAssociationWarnsOnceOnInnerTargetOscillation(t *testing.T) {
 	var logs logRecorder
 	cfg := Config{Logger: logs.logger()}
-	tracker := newUDPConnectionTracker(cfg, "127.0.0.1:50000", "203.0.113.10:39281")
+	tracker := newConnectionTracker(cfg, "udp", "127.0.0.1:50000", "203.0.113.10:39281")
 	assoc := newUDPAssociation(t.Context().Done(), cfg, nil, tracker)
 
 	// Real flow: a destination opens, then datagrams sniff chains.
@@ -541,7 +541,7 @@ func TestUDPAssociationWarnsOnceOnInnerTargetOscillation(t *testing.T) {
 func TestUDPAssociationDoesNotWarnOnFirstInnerTarget(t *testing.T) {
 	var logs logRecorder
 	cfg := Config{Logger: logs.logger()}
-	tracker := newUDPConnectionTracker(cfg, "127.0.0.1:50000", "203.0.113.10:39281")
+	tracker := newConnectionTracker(cfg, "udp", "127.0.0.1:50000", "203.0.113.10:39281")
 	assoc := newUDPAssociation(t.Context().Done(), cfg, nil, tracker)
 
 	assoc.noteTargetOpened("203.0.113.10:39281")
@@ -612,13 +612,13 @@ func TestUDPAssociationRejectsUnexpectedClientBeforePinning(t *testing.T) {
 	if assoc.adoptClientAddr(wrongPort) {
 		t.Fatal("datagram from a different declared port claimed the association")
 	}
-	if pinned := assoc.getClientAddr(); pinned != nil {
+	if pinned := assoc.pinnedClientAddr(); pinned != nil {
 		t.Fatalf("unexpected source was pinned as %s", pinned)
 	}
 	if !assoc.adoptClientAddr(client) {
 		t.Fatal("TCP control client's declared UDP endpoint was rejected")
 	}
-	if pinned := assoc.getClientAddr(); !sameUDPAddr(pinned, client) {
+	if pinned := assoc.pinnedClientAddr(); !sameUDPAddr(pinned, client) {
 		t.Fatalf("pinned addr=%v, want %v", pinned, client)
 	}
 	if got := logs.count("reason=not-associated-client"); got != 1 {
@@ -712,7 +712,7 @@ func TestUDPAssociationPinsClientAndDropsForeignSources(t *testing.T) {
 		}
 	}
 	requireNoReceive(t, opens, "foreign source target open")
-	if got := assoc.getClientAddr(); got.String() != client.String() {
+	if got := assoc.pinnedClientAddr(); got.String() != client.String() {
 		t.Fatalf("response addr=%s, want pinned client %s", got, client)
 	}
 

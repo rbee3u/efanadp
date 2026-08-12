@@ -77,15 +77,7 @@ type connectionTracker struct {
 	target string
 }
 
-func newConnectionTracker(cfg Config, source, target string) *connectionTracker {
-	return newProtocolConnectionTracker(cfg, "tcp", source, target)
-}
-
-func newUDPConnectionTracker(cfg Config, source, target string) *connectionTracker {
-	return newProtocolConnectionTracker(cfg, "udp", source, target)
-}
-
-func newProtocolConnectionTracker(cfg Config, protocol, source, target string) *connectionTracker {
+func newConnectionTracker(cfg Config, protocol, source, target string) *connectionTracker {
 	return &connectionTracker{
 		cfg:       cfg,
 		id:        nextConnID.Add(1),

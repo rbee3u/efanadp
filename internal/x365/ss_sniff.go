@@ -4,12 +4,22 @@ import (
 	"encoding/binary"
 )
 
+// Shadowsocks AEAD stream framing: a salt, then length-prefixed chunks whose
+// 2-byte length and payload each carry their own tag.
 const (
-	shadowsocksAEADTagSize     = 16
-	shadowsocksAEADNonceSize   = 12
-	shadowsocksMaxChunkPayload = 0x3fff
-	shadowsocks2022FixedHeader = 11
-	shadowsocks2022Context     = "shadowsocks 2022 session subkey"
+	shadowsocksAEADTagSize         = 16
+	shadowsocksAEADNonceSize       = 12
+	shadowsocksAEADLengthFieldSize = 2
+	shadowsocksMaxChunkPayload     = 0x3fff
+)
+
+// Shadowsocks 2022 request header: one type byte, an 8-byte timestamp, and the
+// 2-byte length of the variable-length header that carries the target address.
+const (
+	shadowsocks2022HeaderLenOffset   = 9
+	shadowsocks2022FixedHeaderLen    = 11
+	shadowsocks2022MaxVariableHeader = 0xffff
+	shadowsocks2022Context           = "shadowsocks 2022 session subkey"
 )
 
 type shadowsocksSniffState int
@@ -102,9 +112,12 @@ func (s *ShadowsocksTargetSniffer) Observe(p []byte) (string, bool) {
 
 func shadowsocksSniffBufferLimitForSpec(config ShadowsocksSniffConfig, spec ssCipherSpec) int {
 	if spec.is2022 {
-		return spec.saltSize + shadowsocks2022EIHLen(config.Password) + shadowsocks2022FixedHeader + shadowsocksAEADTagSize + 0xffff + shadowsocksAEADTagSize
+		return spec.saltSize + shadowsocks2022EIHLen(config.Password) +
+			shadowsocks2022FixedHeaderLen + shadowsocksAEADTagSize +
+			shadowsocks2022MaxVariableHeader + shadowsocksAEADTagSize
 	}
-	return spec.saltSize + 2 + shadowsocksAEADTagSize + shadowsocksMaxChunkPayload + shadowsocksAEADTagSize
+	return spec.saltSize + shadowsocksAEADLengthFieldSize + shadowsocksAEADTagSize +
+		shadowsocksMaxChunkPayload + shadowsocksAEADTagSize
 }
 
 func (s *ShadowsocksTargetSniffer) sniff(data []byte) (string, shadowsocksSniffState) {
@@ -115,7 +128,7 @@ func (s *ShadowsocksTargetSniffer) sniff(data []byte) (string, shadowsocksSniffS
 }
 
 func sniffShadowsocksTargetWithMasterKey(spec ssCipherSpec, masterKey []byte, data []byte) (string, shadowsocksSniffState) {
-	if len(data) < spec.saltSize+2+shadowsocksAEADTagSize {
+	if len(data) < spec.saltSize+shadowsocksAEADLengthFieldSize+shadowsocksAEADTagSize {
 		return "", sniffNeedMore
 	}
 
@@ -131,12 +144,12 @@ func sniffShadowsocksTargetWithMasterKey(spec ssCipherSpec, masterKey []byte, da
 
 	var nonce [shadowsocksAEADNonceSize]byte
 	lengthStart := spec.saltSize
-	lengthEnd := lengthStart + 2 + shadowsocksAEADTagSize
+	lengthEnd := lengthStart + shadowsocksAEADLengthFieldSize + shadowsocksAEADTagSize
 	lengthPlaintext, err := aead.Open(nil, nonce[:], data[lengthStart:lengthEnd], nil)
 	if err != nil {
 		return "", sniffFailed
 	}
-	if len(lengthPlaintext) != 2 {
+	if len(lengthPlaintext) != shadowsocksAEADLengthFieldSize {
 		return "", sniffFailed
 	}
 	payloadLen := int(binary.BigEndian.Uint16(lengthPlaintext))
@@ -163,7 +176,7 @@ func sniffShadowsocksTargetWithMasterKey(spec ssCipherSpec, masterKey []byte, da
 
 func sniffShadowsocks2022TargetWithKey(candidate shadowsocks2022KeyCandidate, spec ssCipherSpec, data []byte) (string, shadowsocksSniffState) {
 	fixedStart := spec.saltSize + candidate.eihLen
-	fixedEnd := fixedStart + shadowsocks2022FixedHeader + shadowsocksAEADTagSize
+	fixedEnd := fixedStart + shadowsocks2022FixedHeaderLen + shadowsocksAEADTagSize
 	if len(data) < fixedEnd {
 		return "", sniffNeedMore
 	}
@@ -180,10 +193,12 @@ func sniffShadowsocks2022TargetWithKey(candidate shadowsocks2022KeyCandidate, sp
 	if err != nil {
 		return "", sniffFailed
 	}
-	if len(fixedHeader) != shadowsocks2022FixedHeader || fixedHeader[0] != 0 {
+	if len(fixedHeader) != shadowsocks2022FixedHeaderLen || fixedHeader[0] != 0 {
 		return "", sniffFailed
 	}
-	variableLen := int(binary.BigEndian.Uint16(fixedHeader[9:11]))
+	variableLen := int(binary.BigEndian.Uint16(
+		fixedHeader[shadowsocks2022HeaderLenOffset:shadowsocks2022FixedHeaderLen],
+	))
 	if variableLen <= 0 {
 		return "", sniffFailed
 	}

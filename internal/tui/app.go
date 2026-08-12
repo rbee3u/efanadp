@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -55,12 +57,45 @@ func prepareStartup(opts Options) (startupConfig, error) {
 	if err != nil {
 		return startupConfig{}, fmt.Errorf("load config: %s", userConfigLoadError(runtime.configPath, err))
 	}
+	if err := validateLogOutputPath(loaded.Log.Output, runtime.configPath, runtime.settingsPath); err != nil {
+		return startupConfig{}, fmt.Errorf("load config: %w", err)
+	}
 	runtime.loaded = loaded
 	return startupConfig{
 		runtime:     runtime,
 		settings:    settings,
 		settingsErr: settingsErr,
 	}, nil
+}
+
+// validateLogOutputPath rejects a log file that is really the config or settings
+// file. Nothing else protects them: the logger opens its output for append, so a
+// config path would have log lines written over private input the app only ever
+// reads and cannot regenerate, and a settings path would race saveSettings,
+// whose temp-file rename and the logger's appends each corrupt the other.
+func validateLogOutputPath(output, configPath, settingsPath string) error {
+	switch strings.ToLower(strings.TrimSpace(output)) {
+	case "stdout", "stderr":
+		return nil
+	}
+	if pathsReferToSameFile(output, configPath) {
+		return fmt.Errorf("log.output resolves to the config file")
+	}
+	if pathsReferToSameFile(output, settingsPath) {
+		return fmt.Errorf("log.output resolves to the settings file")
+	}
+	return nil
+}
+
+func pathsReferToSameFile(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr == nil && rightErr == nil && leftAbs == rightAbs {
+		return true
+	}
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
 
 func resolveConfigPath(explicitPath string, settings appSettings) string {
@@ -74,7 +109,7 @@ func resolveConfigPath(explicitPath string, settings appSettings) string {
 }
 
 func newModel(startup startupConfig, deps modelDeps) *Model {
-	config := startup.runtime
+	runtime := startup.runtime
 	if deps.logger == nil {
 		deps.logger = noopLogger{}
 	}
@@ -85,15 +120,15 @@ func newModel(startup startupConfig, deps modelDeps) *Model {
 	nodes := nodesForDisplay(startup.runtime.loaded.Nodes)
 
 	model := &Model{
-		config:   config,
+		config:   runtime,
 		deps:     deps,
 		state:    stateNodeList,
 		nodeList: newNodeList(nodeItemsWithCurrent(nodes, "")),
 		nodes:    nodes,
 	}
 	if startup.settingsErr != nil {
-		deps.logger.Warnf("[efanadp] load settings failed path=%s err=%v", config.settingsPath, startup.settingsErr)
-		model.setStatus(statusWarning, "Failed to read settings; using "+config.configPath+": "+shortError(startup.settingsErr))
+		deps.logger.Warnf("[efanadp] load settings failed path=%s err=%v", runtime.settingsPath, startup.settingsErr)
+		model.setStatus(statusWarning, "Failed to read settings; using "+runtime.configPath+": "+shortError(startup.settingsErr))
 		return model
 	}
 	if remembered := strings.TrimSpace(startup.settings.NodeName); remembered != "" {

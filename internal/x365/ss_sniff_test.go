@@ -562,7 +562,7 @@ func buildShadowsocks2022FirstPacket(
 	}
 
 	nonce := make([]byte, shadowsocksAEADNonceSize)
-	fixedHeader := make([]byte, shadowsocks2022FixedHeader)
+	fixedHeader := make([]byte, shadowsocks2022FixedHeaderLen)
 	fixedHeader[0] = 0
 	binary.BigEndian.PutUint64(fixedHeader[1:9], mustCurrentUnixUint64(tb))
 	binary.BigEndian.PutUint16(fixedHeader[9:11], mustUint16(tb, len(payload), "payload length"))

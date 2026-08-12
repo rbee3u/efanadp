@@ -46,7 +46,7 @@ func TestIsBenignClientError(t *testing.T) {
 	}
 }
 
-func TestRelayMultipathCancelClosesBothSides(t *testing.T) {
+func TestRelayTCPCancelClosesBothSides(t *testing.T) {
 	clientPeer, client := net.Pipe()
 	defer func() {
 		_ = clientPeer.Close()
@@ -59,12 +59,12 @@ func TestRelayMultipathCancelClosesBothSides(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
-		done <- relayMultipath(ctx, client, upstream, &Stats{}, nil)
+		done <- relayTCP(ctx, client, upstream, &Stats{}, nil)
 	}()
 
 	cancel()
 	if err := receiveWithin(t, done, "relay shutdown"); err != nil {
-		t.Fatalf("relayMultipath returned %v", err)
+		t.Fatalf("relayTCP returned %v", err)
 	}
 
 	assertPipeWriteClosed(t, clientPeer)

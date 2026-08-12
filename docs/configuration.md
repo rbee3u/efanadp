@@ -128,12 +128,19 @@ falls back to `config.yaml`.
 is normalized to `warn`.
 
 `log.output` accepts `stdout`, `stderr`, or a normal local path. Path outputs are
-rotated at 100 MiB per file, keeping 4 rotated files for up to 30 days.
+rotated at 100 MiB per file, keeping 4 rotated files for up to 30 days. It must
+not resolve to the active config file or `settings.json`, because log writes
+would corrupt runtime input or saved startup state.
 
 `log.format` accepts `text` and `json`.
 
 The legacy `log_path` field is no longer accepted; use `log.output` instead.
 See [`logging.md`](logging.md) for output behavior and event examples.
+
+Use exactly one node source: either `proxies`, or `proxies_tmpl` with
+`proxies_uuid`. Config files containing both are rejected rather than silently
+choosing one. A config file must also contain a single YAML document; additional
+documents are rejected so no configuration is silently ignored.
 
 ## Shadowsocks Target Sniffing
 

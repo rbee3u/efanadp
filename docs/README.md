@@ -10,6 +10,8 @@ The canonical directory is `docs/`; this repository does not use `doc/`.
 
 | Need | Read |
 | --- | --- |
+| Domain language and ubiquitous terms | [CONTEXT.md](../CONTEXT.md) |
+| Architecture boundary and service ownership | [ADR 0001](adr/0001-local-x365-adapter-boundary.md) |
 | Private material, safe examples, settings, log redaction, template safety | [privacy.md](privacy.md) |
 | First run, mihomo rules, TUI controls, smoke tests | [setup.md](setup.md) |
 | Log outputs, event fields, TCP/UDP examples | [logging.md](logging.md) |

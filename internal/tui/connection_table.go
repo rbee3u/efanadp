@@ -87,17 +87,34 @@ type connectionTableLayout struct {
 	downWidth  int
 }
 
-func newConnectionTableLayout(rows []connectionItem, now time.Time, width int) connectionTableLayout {
-	const (
-		maxConnectionIDWidth = 9
-		maxTargetWidth       = 80
-	)
+// Connection table geometry. ID, Type, Age, Up, and Down are sized to their
+// widest row and then capped, so one long value cannot squeeze Source and
+// Target, which carry the text worth reading. connectionColumnGapTotal is the
+// width of the separators between the seven columns, named once so the width
+// reserved for them and the width of the header rule cannot drift apart.
+const (
+	maxConnectionIDWidth     = 9
+	maxConnectionTypeWidth   = 4
+	maxConnectionAgeWidth    = 6
+	maxConnectionByteWidth   = 9
+	maxConnectionFromWidth   = 22
+	maxConnectionToWidth     = 80
+	minConnectionCellWidth   = 10
+	minConnectionPeerWidth   = 20
+	connectionColumnGapTotal = 12
 
+	// fallbackConnectionTableWidth stands in until the terminal reports its size;
+	// minConnectionTableWidth keeps the columns readable on a narrow one.
+	fallbackConnectionTableWidth = 118
+	minConnectionTableWidth      = 58
+)
+
+func newConnectionTableLayout(rows []connectionItem, now time.Time, width int) connectionTableLayout {
 	availableWidth := width
 	if availableWidth <= 0 {
-		availableWidth = 118
+		availableWidth = fallbackConnectionTableWidth
 	}
-	availableWidth = max(58, availableWidth)
+	availableWidth = max(minConnectionTableWidth, availableWidth)
 
 	layout := connectionTableLayout{
 		idWidth:   lipgloss.Width("ID"),
@@ -115,23 +132,17 @@ func newConnectionTableLayout(rows []connectionItem, now time.Time, width int) c
 	}
 
 	layout.idWidth = min(layout.idWidth, maxConnectionIDWidth)
-	layout.typeWidth = min(layout.typeWidth, 4)
-	layout.ageWidth = min(layout.ageWidth, 6)
-	layout.upWidth = min(layout.upWidth, 9)
-	layout.downWidth = min(layout.downWidth, 9)
+	layout.typeWidth = min(layout.typeWidth, maxConnectionTypeWidth)
+	layout.ageWidth = min(layout.ageWidth, maxConnectionAgeWidth)
+	layout.upWidth = min(layout.upWidth, maxConnectionByteWidth)
+	layout.downWidth = min(layout.downWidth, maxConnectionByteWidth)
 
-	fixedWidth := layout.idWidth + layout.typeWidth + layout.ageWidth + layout.upWidth + layout.downWidth + 12
-	peerWidth := max(20, availableWidth-fixedWidth)
-	layout.fromWidth = min(22, max(10, peerWidth/3))
-	layout.toWidth = min(maxTargetWidth, max(10, peerWidth-layout.fromWidth))
-	layout.totalWidth = layout.idWidth +
-		layout.typeWidth +
-		layout.fromWidth +
-		layout.toWidth +
-		layout.ageWidth +
-		layout.upWidth +
-		layout.downWidth +
-		12
+	fixedWidth := layout.idWidth + layout.typeWidth + layout.ageWidth +
+		layout.upWidth + layout.downWidth + connectionColumnGapTotal
+	peerWidth := max(minConnectionPeerWidth, availableWidth-fixedWidth)
+	layout.fromWidth = min(maxConnectionFromWidth, max(minConnectionCellWidth, peerWidth/3))
+	layout.toWidth = min(maxConnectionToWidth, max(minConnectionCellWidth, peerWidth-layout.fromWidth))
+	layout.totalWidth = fixedWidth + layout.fromWidth + layout.toWidth
 	return layout
 }
 

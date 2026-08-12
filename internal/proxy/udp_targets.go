@@ -432,7 +432,7 @@ func (a *udpAssociation) relayFromTarget(target *udpTarget) {
 			a.removeTarget(target)
 			return
 		}
-		addr := a.getClientAddr()
+		addr := a.pinnedClientAddr()
 		if addr == nil {
 			continue
 		}

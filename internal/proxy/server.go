@@ -58,9 +58,7 @@ func ServeSOCKS(ctx context.Context, listen string, cfg Config) error {
 }
 
 func serveSOCKS(ctx context.Context, ln net.Listener, cfg Config) error {
-	defer func() {
-		closeQuietly(ln)
-	}()
+	defer closeQuietly(ln)
 
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -153,9 +151,7 @@ func waitBeforeAcceptRetry(ctx context.Context, delay time.Duration) bool {
 }
 
 func handleSOCKSConn(ctx context.Context, client net.Conn, cfg Config) error {
-	defer func() {
-		closeQuietly(client)
-	}()
+	defer closeQuietly(client)
 	stopClosingClient := closeWhenContextDone(ctx, client)
 	defer stopClosingClient()
 
@@ -180,23 +176,21 @@ func handleSOCKSConnect(ctx context.Context, client net.Conn, reader *bufio.Read
 		return fmt.Errorf("SOCKS5 request got mihomo fake-ip %s; use socks5h:// so the proxy receives the domain", request.Host)
 	}
 
-	tracker := newConnectionTracker(cfg, client.RemoteAddr().String(), request.Address)
+	tracker := newConnectionTracker(cfg, "tcp", client.RemoteAddr().String(), request.Address)
 	tracker.open()
 
-	upstream, err := cfg.dialMultipath(ctx, request.Host, request.Port)
+	upstream, err := cfg.dialTCP(ctx, request.Host, request.Port)
 	if err != nil {
 		writeSOCKSReplyQuietly(client, socksReplyConnectionRefused)
 		tracker.close(err)
 		return nil
 	}
-	defer func() {
-		closeQuietly(upstream)
-	}()
+	defer closeQuietly(upstream)
 	stopClosingUpstream := closeWhenContextDone(ctx, upstream)
 	defer stopClosingUpstream()
 
 	writeSOCKSReplyQuietly(client, socksReplySucceeded)
-	err = relayMultipath(ctx, &bufferedConn{Conn: client, reader: reader}, upstream, tracker.stats, uploadObserverFor(cfg, request, tracker))
+	err = relayTCP(ctx, &bufferedConn{Conn: client, reader: reader}, upstream, tracker.stats, uploadObserverFor(cfg, request, tracker))
 	tracker.close(err)
 	return nil
 }
@@ -254,7 +248,7 @@ func (cfg Config) emitConnection(event Event) {
 	cfg.OnConnection(event)
 }
 
-func (cfg Config) dialMultipath(ctx context.Context, destHost string, destPort int) (io.ReadWriteCloser, error) {
+func (cfg Config) dialTCP(ctx context.Context, destHost string, destPort int) (io.ReadWriteCloser, error) {
 	if cfg.Upstream == nil {
 		return nil, errors.New("proxy upstream is required")
 	}

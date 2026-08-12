@@ -117,6 +117,22 @@ func TestGenerateReferenceRejectsMissingProxies(t *testing.T) {
 	}
 }
 
+func TestGenerateReferenceRejectsPlainAndPackedProxiesTogether(t *testing.T) {
+	template := testPackedProxyTemplate(t, `
+packed:
+  - `+testProxyTemplateURL()+`
+`)
+	_, err := GenerateReference([]byte(`
+proxies:
+  plain:
+    - ` + testProxyURL("example.com", "/plain") + `
+proxies_tmpl: ` + template + `
+`))
+	if err == nil || !strings.Contains(err.Error(), "proxies and proxies_tmpl cannot both be set") {
+		t.Fatalf("err=%v, want ambiguous proxy source rejection", err)
+	}
+}
+
 func TestGenerateReferenceRedactsProxyURLValidationErrors(t *testing.T) {
 	unsupportedProxyURL := "https://secret.example.org/hidden-node?" +
 		"uuid=00112233-4455-6677-8899-aabbccddeeff&pbk=test-public-key"

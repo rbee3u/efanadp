@@ -12,7 +12,7 @@ func TestConnectionTrackerCloseUsesUpdatedTarget(t *testing.T) {
 		OnConnection: func(event Event) {
 			events = append(events, event)
 		},
-	}, "127.0.0.1:53000", "203.0.113.10:39281")
+	}, "tcp", "127.0.0.1:53000", "203.0.113.10:39281")
 
 	tracker.open()
 	tracker.updateTarget("203.0.113.10:39281->ifconfig.me:443")
@@ -37,12 +37,12 @@ func TestConnectionTrackerCloseUsesUpdatedTarget(t *testing.T) {
 // concurrent updates must not race on the tracker's target field.
 func TestConnectionTrackerUpdateTargetIsThreadSafe(t *testing.T) {
 	var mu sync.Mutex
-	tracker := newUDPConnectionTracker(Config{
+	tracker := newConnectionTracker(Config{
 		OnConnection: func(Event) {
 			mu.Lock()
 			defer mu.Unlock()
 		},
-	}, "127.0.0.1:53000", "203.0.113.10:39281")
+	}, "udp", "127.0.0.1:53000", "203.0.113.10:39281")
 
 	var wg sync.WaitGroup
 	for i := range 32 {

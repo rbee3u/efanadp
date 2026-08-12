@@ -32,6 +32,9 @@ const (
 		"#       method: aes-256-gcm\n" +
 		"#       password: <shadowsocks-password>\n\n"
 
+	// referenceTemplateValidationUUID stands in for stripped userinfo so a
+	// UUID-less template URL can be parsed for validation. It never reaches the
+	// generated file.
 	referenceTemplateValidationUUID = "00112233-4455-6677-8899-aabbccddeeff"
 )
 
@@ -40,6 +43,10 @@ type referenceData struct {
 	encodedProxies string
 }
 
+// GenerateReference renders the committed reference template from a private
+// config file's contents. It strips X365 UUID userinfo only: node hosts, paths,
+// and REALITY material survive into the packed template, so callers must review
+// the output before committing it. See docs/privacy.md.
 func GenerateReference(data []byte) ([]byte, error) {
 	source, err := readRawConfig(data)
 	if err != nil {
@@ -70,6 +77,9 @@ func GenerateReference(data []byte) ([]byte, error) {
 
 func referenceProxyTemplate(source rawConfig) (yaml.MapSlice, error) {
 	if len(source.Proxies) > 0 {
+		if strings.TrimSpace(source.ProxiesTmpl) != "" {
+			return nil, errors.New("proxies and proxies_tmpl cannot both be set")
+		}
 		return proxyTemplate(source.Proxies)
 	}
 	if strings.TrimSpace(source.ProxiesTmpl) != "" {

@@ -40,7 +40,7 @@ func handleSOCKSUDPAssociate(
 		return err
 	}
 
-	tracker := newUDPConnectionTracker(cfg, client.RemoteAddr().String(), "UDP_ASSOCIATE "+request.Address)
+	tracker := newConnectionTracker(cfg, "udp", client.RemoteAddr().String(), "UDP_ASSOCIATE "+request.Address)
 	tracker.open()
 	var relayErr error
 	defer func() {
@@ -319,11 +319,11 @@ func (a *udpAssociation) adoptClientAddr(addr *net.UDPAddr) bool {
 		if a.clientAddr.CompareAndSwap(nil, &copied) {
 			return true
 		}
-		// CAS failed, reload - this must succeed because another goroutine won
+		// Another source won the CAS, so compare against whatever it pinned.
+		// clientAddr only ever moves from nil to non-nil, so this reload cannot
+		// observe nil; the branch below is unreachable and kept as a guard.
 		pinned = a.clientAddr.Load()
 		if pinned == nil {
-			// Should never happen: another goroutine raced and won but we still
-			// see nil. Reject defensively rather than panic in sameUDPAddr.
 			return false
 		}
 	}
@@ -409,9 +409,9 @@ func sameUDPAddr(left, right *net.UDPAddr) bool {
 	return left.Port == right.Port && left.Zone == right.Zone && left.IP.Equal(right.IP)
 }
 
-// getClientAddr returns the pinned client address, or nil before one is pinned.
+// pinnedClientAddr returns the pinned client address, or nil before one is pinned.
 // The result is shared and must not be mutated; WriteToUDP only reads it.
-func (a *udpAssociation) getClientAddr() *net.UDPAddr {
+func (a *udpAssociation) pinnedClientAddr() *net.UDPAddr {
 	return a.clientAddr.Load()
 }
 

@@ -7,13 +7,19 @@ import (
 	"fmt"
 )
 
+// Multipath frame header layout: one type byte, an 8-byte sequence number, one
+// reserved byte, and a 3-byte payload length.
 const (
 	frameHeaderSize = 13
 	frameMaxPayload = 0xffffff
-	frameHello      = 0
-	frameData       = 1
-	frameClose      = 3
-	frameACK        = 5
+)
+
+// Multipath frame types, as carried in the first header byte.
+const (
+	frameHello byte = 0
+	frameData  byte = 1
+	frameClose byte = 3
+	frameACK   byte = 5
 )
 
 type frame struct {
