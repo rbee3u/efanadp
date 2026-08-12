@@ -34,14 +34,37 @@ func TestParseNodeKeepsPrivateFingerprint(t *testing.T) {
 	}
 }
 
-func TestParseNodeRejectsInvalidUserID(t *testing.T) {
-	_, err := ParseNode(
-		"test",
-		"x365://not-a-uuid@example.com:443?"+
-			"path=/x&host=example.net&sni=example.net&pbk=test-public-key&sid=01020304",
-	)
-	if err == nil || !strings.Contains(err.Error(), "invalid user id") {
-		t.Fatalf("err=%v, want invalid user id", err)
+// url.URL.String inserts the path separator itself, but the Referer header is
+// built by concatenating host and path, so a path without a leading slash would
+// send "https://example.netnode" on a transport meant to look like ordinary
+// browser traffic.
+func TestParseNodeNormalizesPathSeparator(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "already absolute", path: "/x", want: "/x"},
+		{name: "missing separator", path: "x", want: "/x"},
+		{name: "missing separator with segments", path: "a/b", want: "/a/b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ParseNode(
+				"test",
+				"x365://00112233-4455-6677-8899-aabbccddeeff@example.com:443?"+
+					"path="+tt.path+"&host=example.net&sni=example.net&pbk="+testRealityPublicKey+"&sid=01020304",
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if node.Path != tt.want {
+				t.Fatalf("Path=%q, want %q", node.Path, tt.want)
+			}
+			if referer := "https://" + node.Host + node.Path; referer != "https://example.net"+tt.want {
+				t.Fatalf("Referer=%q, want a separator between host and path", referer)
+			}
+		})
 	}
 }
 
@@ -84,48 +107,38 @@ func TestParseNodeRejectsInvalidPort(t *testing.T) {
 	}
 }
 
-func TestParseNodeRejectsInvalidPublicKeyWithoutLeakingNodeMaterial(t *testing.T) {
+// ParseNode is the gate every configured node passes through, so it is where the
+// REALITY material is rejected before a node reaches the list. The error travels
+// to the TUI and the log file, so it must name the failure without carrying the
+// provider host, path, or key material that produced it.
+func TestParseNodeRejectsInvalidRealityMaterialWithoutLeakingNodeMaterial(t *testing.T) {
 	tests := []struct {
 		name string
 		pbk  string
-		want string
-	}{
-		{
-			name: "bad base64",
-			pbk:  "private!key",
-			want: "invalid reality public key",
-		},
-		{
-			name: "wrong length",
-			pbk:  "AQID",
-			want: "reality public key must be 32 bytes",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := ParseNode(
-				"test",
-				"x365://00112233-4455-6677-8899-aabbccddeeff@private.example:443?"+
-					"path=/hidden&host=origin.example&sni=origin.example&pbk="+tt.pbk+"&sid=01020304",
-			)
-			requireRedactedError(t, err, tt.want, "private.example", "/hidden", "origin.example", tt.pbk, "01020304")
-		})
-	}
-}
-
-func TestParseNodeRejectsInvalidShortIDWithoutLeakingNodeMaterial(t *testing.T) {
-	tests := []struct {
-		name string
 		sid  string
 		want string
 	}{
 		{
-			name: "bad hex",
+			name: "public key bad base64",
+			pbk:  "private!key",
+			sid:  "01020304",
+			want: "invalid reality public key",
+		},
+		{
+			name: "public key wrong length",
+			pbk:  "AQID",
+			sid:  "01020304",
+			want: "reality public key must be 32 bytes",
+		},
+		{
+			name: "short id bad hex",
+			pbk:  testRealityPublicKey,
 			sid:  "private-sid",
 			want: "invalid reality short id",
 		},
 		{
-			name: "too long",
+			name: "short id too long",
+			pbk:  testRealityPublicKey,
 			sid:  "010203040506070809",
 			want: "reality short id must be at most 8 bytes",
 		},
@@ -135,9 +148,9 @@ func TestParseNodeRejectsInvalidShortIDWithoutLeakingNodeMaterial(t *testing.T) 
 			_, err := ParseNode(
 				"test",
 				"x365://00112233-4455-6677-8899-aabbccddeeff@private.example:443?"+
-					"path=/hidden&host=origin.example&sni=origin.example&pbk="+testRealityPublicKey+"&sid="+tt.sid,
+					"path=/hidden&host=origin.example&sni=origin.example&pbk="+tt.pbk+"&sid="+tt.sid,
 			)
-			requireRedactedError(t, err, tt.want, "private.example", "/hidden", "origin.example", tt.sid)
+			requireRedactedError(t, err, tt.want, "private.example", "/hidden", "origin.example", tt.pbk, tt.sid)
 		})
 	}
 }

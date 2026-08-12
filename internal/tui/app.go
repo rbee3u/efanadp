@@ -94,14 +94,15 @@ func newModel(startup startupConfig, deps modelDeps) *Model {
 	if startup.settingsErr != nil {
 		deps.logger.Warnf("[efanadp] load settings failed path=%s err=%v", config.settingsPath, startup.settingsErr)
 		model.setStatus(statusWarning, "Failed to read settings; using "+config.configPath+": "+shortError(startup.settingsErr))
+		return model
 	}
-	if startup.settingsErr == nil && strings.TrimSpace(startup.settings.NodeName) != "" {
-		model.rememberedNodeName = strings.TrimSpace(startup.settings.NodeName)
-		if node, ok := model.selectNodeByName(model.rememberedNodeName); ok {
+	if remembered := strings.TrimSpace(startup.settings.NodeName); remembered != "" {
+		model.rememberedNodeName = remembered
+		if node, ok := model.selectNodeByName(remembered); ok {
 			model.setStatus(statusSuccess, "Restored previous node: "+node.Name)
 			model.startupNode = &node
 		} else {
-			model.setStatus(statusWarning, fmt.Sprintf("Loaded %d nodes; previous node %q is not in this config", len(model.nodes), model.rememberedNodeName))
+			model.setStatus(statusWarning, fmt.Sprintf("Loaded %d nodes; previous node %q is not in this config", len(model.nodes), remembered))
 			model.rememberedNodeName = ""
 		}
 	}

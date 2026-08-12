@@ -93,7 +93,7 @@ func proxyTemplateFromPacked(encoded string) (yaml.MapSlice, error) {
 	}
 	var source yaml.MapSlice
 	if err := yaml.Unmarshal(data, &source); err != nil {
-		return nil, fmt.Errorf("parse proxies_tmpl YAML: %w", err)
+		return nil, fmt.Errorf("parse proxies_tmpl YAML: %s", safeYAMLError(err))
 	}
 	if len(source) == 0 {
 		return nil, errors.New("proxies_tmpl contains no proxy groups")

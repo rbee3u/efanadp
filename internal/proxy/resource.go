@@ -35,5 +35,5 @@ func setDeadlineQuietly(conn net.Conn, deadline time.Time) {
 }
 
 func writeSOCKSReplyQuietly(writer io.Writer, code byte) {
-	_ = writeSocksReply(writer, code)
+	_ = writeSOCKSReply(writer, code)
 }

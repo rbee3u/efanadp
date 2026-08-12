@@ -302,7 +302,7 @@ func TestHandleSOCKSConnUDPAssociateRelaysDatagrams(t *testing.T) {
 	}
 
 	ssPacket := []byte("query")
-	packet, err := buildSocksUDPDatagram("example.com", 53, ssPacket)
+	packet, err := buildSOCKSUDPDatagram("example.com", 53, ssPacket)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestHandleSOCKSConnUDPAssociateRelaysDatagrams(t *testing.T) {
 	if response.addr.String() != clientAddr.String() {
 		t.Fatalf("response addr=%s, want %s", response.addr, clientAddr)
 	}
-	got, err := parseSocksUDPDatagram(response.payload)
+	got, err := parseSOCKSUDPDatagram(response.payload)
 	if err != nil {
 		t.Fatal(err)
 	}

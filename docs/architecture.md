@@ -117,6 +117,11 @@ An ACK therefore goes out inline when the write path is idle, and is otherwise
 handed to a per-connection sender goroutine. ACKs are cumulative, so the queue
 keeps only the newest sequence.
 
+The graceful multipath close frame is also bounded. An idle write lock does not
+guarantee that the HTTP/2 write itself can progress, so shutdown waits up to 100
+ms for the frame and then closes the underlying stream to release it. A stalled
+peer therefore cannot hold a SOCKS handler or node switch open indefinitely.
+
 ## UDP Relay Path
 
 For SOCKS5 `UDP_ASSOCIATE`, the adapter:
@@ -124,9 +129,13 @@ For SOCKS5 `UDP_ASSOCIATE`, the adapter:
 1. Creates a local UDP relay socket tied to the TCP association.
 2. Parses SOCKS5 UDP envelopes from the client.
 3. Drops fragments, fake IP targets, and UDP/443.
-4. Pins the association to the first source that sends a valid datagram and
-   drops datagrams from any other local source.
-5. Opens one cached direct X365 UDP stream per target host/port.
+4. Requires the UDP source IP to match the TCP control client, honors a non-zero
+   source port declared by the `UDP_ASSOCIATE` request, then pins the association
+   to the first valid source port when the request used port zero. Datagrams from
+   any other source are dropped.
+5. Opens one cached direct X365 UDP stream per target host/port, in the
+   background so a handshake never blocks other destinations, up to 64 live or
+   opening destinations per association.
 6. Sends only the datagram payload through the X365 stream.
 7. Rebuilds SOCKS5 UDP envelopes around response payloads.
 8. Closes cached targets that stay idle past the UDP target idle timeout.
@@ -140,9 +149,33 @@ A cache hit marks its target active while the association lock is held, so the
 idle sweep cannot close a destination that an in-flight datagram is about to
 reuse. Steady traffic to one resolver makes that the common case.
 
+A cache miss opens the destination in the background rather than on the client
+relay loop, carrying the datagram that triggered it along with any that arrive
+while it is opening. That loop is the association's only reader, so an open
+running on it would delay every other destination behind a TCP dial, a REALITY
+handshake, and the X365 request write, and the kernel receive buffer drops
+datagrams once it fills. A destination the server refuses would repeat it: the
+open itself succeeds because the X365 response is read lazily, the first target
+read then fails and detaches it, and the next datagram opens it again. Only one
+open runs per destination at a time, and datagrams arriving for a destination
+that is still opening queue onto that open rather than being dropped. The queue
+has room for a handful; past that the client is outrunning a destination that
+is not answering yet, and datagrams are dropped with reason `target-not-ready`
+instead of spending memory to deliver a burst the client has already given up
+on.
+
+The association also caps the combined number of open and opening destinations
+at 64. Without that bound, a burst of unique destinations starts one TCP dial
+and REALITY handshake per datagram before any of them can finish, then retains a
+stream, relay goroutine, and read buffer for each successful open. Further new
+destinations are dropped with reason `target-limit`; traffic to destinations
+already counted by the association continues normally.
+
 Client pinning follows RFC 1928: a `UDP_ASSOCIATE` relay belongs to the client
-that created it. Without it, the relay socket would forward datagrams from any
-local process and send inbound responses to whichever source wrote last.
+that created it. The TCP peer IP is authoritative, and a non-zero port in the
+request narrows the accepted endpoint further; the usual unspecified port is
+pinned by the first valid datagram. Without those checks, another process or a
+remote host could claim the relay first and receive its inbound responses.
 
 Cached targets expire because each one owns an xhttp + REALITY stream, a relay
 goroutine, and a read buffer, while an association only ends when its client

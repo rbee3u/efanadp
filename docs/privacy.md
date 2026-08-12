@@ -28,6 +28,10 @@ Do not commit, quote, or derive examples from them. Do not open private config
 unless the user explicitly asks for runtime debugging. When reporting runtime
 failures, summarize the symptom and redact the material.
 
+Config and packed-template YAML errors report the parser reason and line/column
+position without echoing the source line. Keep that boundary intact: parser
+source excerpts can contain UUIDs, provider hosts, paths, or REALITY material.
+
 ## Safe Examples
 
 Use only sanitized placeholders in committed text:
@@ -54,6 +58,12 @@ provider-specific values after decoding and decompression. Do not decode,
 decompress, expand, or quote it during routine documentation or issue triage.
 When template maintenance is required, inspect the generated diff for sanitized
 output before committing.
+
+The generator writes through a same-directory temporary file, forces mode
+`0600`, and atomically replaces the destination. This prevents a failed write
+from leaving a partial template and tightens an existing output file that had
+broader permissions. It refuses an output path that resolves to the private
+input file, so a mistaken `--out` cannot replace the source configuration.
 
 ## Logs and Reports
 

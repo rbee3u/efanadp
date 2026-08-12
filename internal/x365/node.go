@@ -58,7 +58,7 @@ func ParseNode(name, rawURI string) (Node, error) {
 		UUID:      uuid,
 		Server:    u.Hostname(),
 		Port:      port,
-		Path:      q.Get("path"),
+		Path:      normalizeNodePath(q.Get("path")),
 		Host:      q.Get("host"),
 		SNI:       q.Get("sni"),
 		PublicKey: q.Get("pbk"),
@@ -82,6 +82,21 @@ func (n Node) Label() string {
 
 func (n Node) ServerSummary() string {
 	return fmt.Sprintf("%s:%d path=%s host=%s sni=%s", n.Server, n.Port, n.Path, n.Host, n.SNI)
+}
+
+// normalizeNodePath gives the path a leading slash.
+//
+// url.URL.String inserts the separator itself, so a path without one still
+// produces a correct request URL. The Referer header is built by concatenating
+// host and path, though, and would silently lose the separator, sending
+// "https://example.orgnode" on a transport whose whole purpose is to look like
+// ordinary browser traffic. Normalizing here rather than rejecting keeps a
+// config that works today working.
+func normalizeNodePath(path string) string {
+	if path == "" || strings.HasPrefix(path, "/") {
+		return path
+	}
+	return "/" + path
 }
 
 func missingQueryFields(q url.Values, fields ...string) []string {

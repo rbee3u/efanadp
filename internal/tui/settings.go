@@ -45,12 +45,44 @@ func saveSettings(path string, settings appSettings) error {
 		return err
 	}
 	data = append(data, '\n')
-	if dir := filepath.Dir(path); dir != "." {
+	dir := filepath.Dir(path)
+	if dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 	}
-	return os.WriteFile(path, data, 0o600)
+
+	tmp, err := os.CreateTemp(dir, ".settings-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func (m *Model) saveSettings() error {
@@ -78,16 +110,4 @@ func (m *Model) canShowSettingsWarning() bool {
 		return true
 	}
 	return m.statusKind != statusError && m.statusKind != statusWarning
-}
-
-func shortError(err error) string {
-	text := strings.TrimSpace(err.Error())
-	if text == "" {
-		return "unknown error"
-	}
-	if len([]rune(text)) <= 96 {
-		return text
-	}
-	runes := []rune(text)
-	return string(runes[:96]) + "…"
 }

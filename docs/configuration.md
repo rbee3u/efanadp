@@ -84,6 +84,8 @@ account UUID out of git. To use it:
 decompresses it, inserts `proxies_uuid` before the `@`, and parses it like a
 normal `proxies` block. Older uncompressed base64 templates are accepted for
 local migration, but new reference files are written in the compressed format.
+Unpacked template data is limited to 4 MiB so malformed compressed input cannot
+consume unbounded memory during startup.
 
 Compression and base64 are not redaction. The maintenance command removes X365
 UUID userinfo only, so the generated template can still carry node hosts, paths,
@@ -126,7 +128,7 @@ falls back to `config.yaml`.
 is normalized to `warn`.
 
 `log.output` accepts `stdout`, `stderr`, or a normal local path. Path outputs are
-rotated at 100 MiB per file.
+rotated at 100 MiB per file, keeping 4 rotated files for up to 30 days.
 
 `log.format` accepts `text` and `json`.
 

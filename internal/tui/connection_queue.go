@@ -41,12 +41,22 @@ func newConnectionQueue() *connectionQueue {
 // stops, because connection handlers can outlive the listener.
 func (q *connectionQueue) push(event proxy.Event) {
 	q.mu.Lock()
-	if index, ok := q.updates[event.ID]; ok && event.Type == proxy.ConnectionUpdated {
-		q.pending[index] = event
-	} else {
-		if event.Type == proxy.ConnectionUpdated {
+	switch event.Type {
+	case proxy.ConnectionUpdated:
+		if index, ok := q.updates[event.ID]; ok {
+			// A pending update for this ID is replaced in place: only the newest
+			// label matters, so the queue does not grow per relabel.
+			q.pending[index] = event
+		} else {
 			q.updates[event.ID] = len(q.pending)
+			q.pending = append(q.pending, event)
 		}
+	case proxy.ConnectionClosed:
+		// Clean up the updates map when a connection closes to prevent
+		// unbounded growth over long-lived sessions.
+		delete(q.updates, event.ID)
+		q.pending = append(q.pending, event)
+	case proxy.EventUnknown, proxy.ConnectionOpened:
 		q.pending = append(q.pending, event)
 	}
 	q.mu.Unlock()

@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -236,113 +237,141 @@ proxies:
 	}
 }
 
-func TestParseConfigTextLoadsPackedProxyTemplate(t *testing.T) {
-	tmpl := testPackedProxyTemplate(t, `
-Hong Kong19:
-  - `+testProxyTemplateURL()+`
-`)
-	config, err := parseConfigText(`
-listen: 127.0.0.1:10866
-proxies_uuid: ` + testUserID + `
-proxies_tmpl: ` + tmpl + `
-`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(config.Nodes) != 1 {
-		t.Fatalf("len(nodes)=%d, want 1", len(config.Nodes))
-	}
-	node := config.Nodes[0]
-	if node.UUID != testUserID || node.Server != "example.com" {
-		t.Fatalf("node=%+v, want UUID-filled template", node)
-	}
-}
-
-func TestParseConfigTextLoadsLegacyBase64ProxyTemplate(t *testing.T) {
-	tmpl := base64.StdEncoding.EncodeToString([]byte(`
+// A template is zlib-compressed base64 today and was plain base64 YAML before, so
+// both must unpack and receive the UUID: a config that worked before an upgrade
+// has to keep working. Anything that is neither is reported rather than treated
+// as an empty node list, which would otherwise look like a config with no nodes.
+func TestParseConfigTextUnpacksProxyTemplateEncodings(t *testing.T) {
+	templateBody := `
 Hong Kong19:
   - ` + testProxyTemplateURL() + `
-`))
-	config, err := parseConfigText(`
+`
+
+	tests := []struct {
+		name     string
+		template string
+		wantErr  string
+	}{
+		{
+			name:     "zlib packed",
+			template: testPackedProxyTemplate(t, templateBody),
+		},
+		{
+			name:     "legacy plain base64",
+			template: base64.StdEncoding.EncodeToString([]byte(templateBody)),
+		},
+		{
+			name:     "neither is rejected",
+			template: base64.StdEncoding.EncodeToString([]byte("not compressed template data")),
+			wantErr:  "decompress proxies_tmpl",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config, err := parseConfigText(`
 proxies_uuid: ` + testUserID + `
-proxies_tmpl: ` + tmpl + `
+proxies_tmpl: ` + tt.template + `
 `)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err=%v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(config.Nodes) != 1 {
+				t.Fatalf("len(nodes)=%d, want 1", len(config.Nodes))
+			}
+			node := config.Nodes[0]
+			if node.UUID != testUserID || node.Server != "example.com" {
+				t.Fatalf("node=%+v, want UUID-filled template", node)
+			}
+		})
+	}
+}
+
+func TestUnpackProxyTemplateRejectsOversizedData(t *testing.T) {
+	oversized := strings.Repeat("x", maxProxyTemplateBytes+1)
+	packed, err := packProxyTemplate([]byte(oversized))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(config.Nodes) != 1 {
-		t.Fatalf("len(nodes)=%d, want 1", len(config.Nodes))
+
+	tests := []struct {
+		name    string
+		encoded string
+	}{
+		{name: "zlib expansion", encoded: packed},
+		{name: "legacy base64", encoded: base64.StdEncoding.EncodeToString([]byte(oversized))},
 	}
-	if config.Nodes[0].UUID != testUserID || config.Nodes[0].Server != "example.com" {
-		t.Fatalf("node=%+v, want legacy UUID-filled template", config.Nodes[0])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := unpackProxyTemplate(tt.encoded)
+			if !errors.Is(err, errProxyTemplateTooLarge) {
+				t.Fatalf("err=%v, want errProxyTemplateTooLarge", err)
+			}
+		})
 	}
 }
 
-func TestParseConfigTextRejectsNonZlibProxyTemplate(t *testing.T) {
-	tmpl := base64.StdEncoding.EncodeToString([]byte("not compressed template data"))
-	_, err := parseConfigText(`
-proxies_uuid: ` + testUserID + `
-proxies_tmpl: ` + tmpl + `
-`)
-	if err == nil || !strings.Contains(err.Error(), "decompress proxies_tmpl") {
-		t.Fatalf("err=%v, want decompress proxies_tmpl", err)
-	}
-}
-
+// Blank list entries are tolerated because hand-edited configs collect them, but
+// a group that holds nothing else is reported rather than silently contributing
+// no nodes. Both the direct proxies list and the unpacked template carry the same
+// policy, and each names its own field so the message points at the right one.
 func TestParseConfigTextSkipsBlankProxyURIs(t *testing.T) {
-	config, err := parseConfigText(`
-proxies:
-  Hong Kong19:
-    - ""
-    - "   "
-    - ` + testProxyURL("example.com", "/hk19") + `
-`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(config.Nodes) != 1 {
-		t.Fatalf("len(nodes)=%d, want 1", len(config.Nodes))
-	}
-	_, err = parseConfigText(`
-proxies:
-  Hong Kong19:
-    - ""
-    - "   "
-`)
-	if err == nil || !strings.Contains(err.Error(), "empty proxy URL list") {
-		t.Fatalf("err=%v, want empty proxy URL list", err)
-	}
-}
-
-func TestParseConfigTextSkipsBlankProxyTemplateURIs(t *testing.T) {
-	tmpl := testPackedProxyTemplate(t, `
-Hong Kong19:
-  - ""
-  - "   "
-  - `+testProxyTemplateURL()+`
-`)
-	config, err := parseConfigText(`
-proxies_uuid: ` + testUserID + `
-proxies_tmpl: ` + tmpl + `
-`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(config.Nodes) != 1 {
-		t.Fatalf("len(nodes)=%d, want 1", len(config.Nodes))
+	tests := []struct {
+		name string
+		// build renders a config whose single group holds urls verbatim.
+		build func(t *testing.T, urls string) string
+		// validURL is the node URL form that path accepts: the direct list carries
+		// the UUID, a template must omit it.
+		validURL    string
+		wantEmptyIs string
+	}{
+		{
+			name: "proxies list",
+			build: func(_ *testing.T, urls string) string {
+				return "proxies:\n  Hong Kong19:\n" + urls
+			},
+			validURL:    testProxyURL("example.com", "/hk19"),
+			wantEmptyIs: "empty proxy URL list",
+		},
+		{
+			name: "packed template",
+			build: func(t *testing.T, urls string) string {
+				t.Helper()
+				return "proxies_uuid: " + testUserID + "\n" +
+					"proxies_tmpl: " + testPackedProxyTemplate(t, "Hong Kong19:\n"+urls) + "\n"
+			},
+			validURL:    testProxyTemplateURL(),
+			wantEmptyIs: "empty proxy URL template list",
+		},
 	}
 
-	emptyTmpl := testPackedProxyTemplate(t, `
-Hong Kong19:
-  - ""
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A blank entry alongside a real one is skipped.
+			config, err := parseConfigText(tt.build(t, `  - ""
   - "   "
-`)
-	_, err = parseConfigText(`
-proxies_uuid: ` + testUserID + `
-proxies_tmpl: ` + emptyTmpl + `
-`)
-	if err == nil || !strings.Contains(err.Error(), "empty proxy URL template list") {
-		t.Fatalf("err=%v, want empty proxy URL template list", err)
+  - `+tt.validURL+"\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(config.Nodes) != 1 {
+				t.Fatalf("len(nodes)=%d, want 1", len(config.Nodes))
+			}
+
+			// A group of nothing but blanks is an error, not an empty node list.
+			_, err = parseConfigText(tt.build(t, `  - ""
+  - "   "
+`))
+			if err == nil || !strings.Contains(err.Error(), tt.wantEmptyIs) {
+				t.Fatalf("err=%v, want %q", err, tt.wantEmptyIs)
+			}
+		})
 	}
 }
 
@@ -430,6 +459,17 @@ func TestParseConfigTextRedactsProxyURLValidationErrors(t *testing.T) {
 				"01020304",
 			},
 		},
+		{
+			name: "invalid node uuid",
+			text: "proxies:\n  test:\n    - " + testProxyURLForUser("not-a-uuid", "secret.example.org", "/hidden-node") + "\n",
+			want: "invalid user id",
+			secrets: []string{
+				"secret.example.org",
+				"hidden-node",
+				testRealityPublicKey,
+				"01020304",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -440,15 +480,9 @@ func TestParseConfigTextRedactsProxyURLValidationErrors(t *testing.T) {
 	}
 }
 
-func TestParseConfigTextRejectsInvalidNodeUUID(t *testing.T) {
-	_, err := parseConfigText(`
-proxies:
-  test:
-    - ` + testProxyURLForUser("not-a-uuid", "example.com", "/x") + `
-`)
-	requireRedactedError(t, err, "invalid user id", "example.com", testRealityPublicKey)
-}
-
+// Load wraps the parse error with the config path, so it is the path that reaches
+// the TUI. The redaction has to survive that wrapping: the file name is safe to
+// show, the node material inside the file is not.
 func TestLoadRejectsInvalidNodeUUID(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	text := `

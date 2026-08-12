@@ -2,6 +2,7 @@ package x365
 
 import (
 	"crypto/aes"
+	"crypto/cipher"
 	"encoding/binary"
 	"time"
 )
@@ -13,24 +14,62 @@ const (
 	shadowsocks2022UDPHeaderLen        = 11
 )
 
-func sniffShadowsocksUDPTarget(config ShadowsocksSniffConfig, data []byte) (string, bool) {
-	spec, ok := ssCipherSpecForMethod(config.Method)
-	if !ok {
-		return "", false
-	}
-	if spec.is2022 {
-		return sniffShadowsocks2022UDPTarget(config, spec, data)
-	}
-	masterKey := evpBytesToKey([]byte(config.Password), spec.keySize)
-	return sniffShadowsocksAEADUDPTarget(spec, masterKey, data)
+// ShadowsocksUDPSniffer reads the inner destination out of Shadowsocks UDP
+// datagrams bound for one configured server.
+//
+// It exists so the per-config key material is derived once instead of once per
+// datagram. Every datagram on a UDP association is a candidate, and the
+// derivations are not cheap: the pre-2022 methods stretch the password through
+// chained MD5 rounds, and the 2022 methods base64-decode the PSK and expand an
+// AES key schedule. Only the salt-dependent steps genuinely have to run per
+// datagram, so deriving the rest per datagram spends real CPU on a relay hot
+// path for a result that never changes.
+type ShadowsocksUDPSniffer struct {
+	spec      ssCipherSpec
+	masterKey []byte
+	candidate shadowsocks2022KeyCandidate
+	block     cipher.Block
 }
 
-func SniffShadowsocksUDPChain(configs []ShadowsocksSniffConfig, host string, port int, payload []byte) (string, bool) {
+// NewShadowsocksUDPSniffer returns a sniffer for the config matching host and
+// port, or nil when no config matches or its method is not supported. A nil
+// sniffer is usable: Sniff reports no target.
+func NewShadowsocksUDPSniffer(configs []ShadowsocksSniffConfig, host string, port int) *ShadowsocksUDPSniffer {
 	config, ok := matchingShadowsocksSniffConfig(configs, host, port)
 	if !ok {
+		return nil
+	}
+	spec, ok := ssCipherSpecForMethod(config.Method)
+	if !ok {
+		return nil
+	}
+	if !spec.is2022 {
+		return &ShadowsocksUDPSniffer{
+			spec:      spec,
+			masterKey: evpBytesToKey([]byte(config.Password), spec.keySize),
+		}
+	}
+	candidate, ok := shadowsocks2022UDPKeyCandidateFor(config.Password, spec.keySize)
+	if !ok {
+		return nil
+	}
+	block, err := aes.NewCipher(candidate.blockKey)
+	if err != nil {
+		return nil
+	}
+	return &ShadowsocksUDPSniffer{spec: spec, candidate: candidate, block: block}
+}
+
+// Sniff reports the inner destination carried by one datagram. It is not safe
+// for concurrent use: the 2022 path decrypts through a shared cipher.Block.
+func (s *ShadowsocksUDPSniffer) Sniff(payload []byte) (string, bool) {
+	if s == nil {
 		return "", false
 	}
-	return sniffShadowsocksUDPTarget(config, payload)
+	if s.spec.is2022 {
+		return sniffShadowsocks2022UDPTargetWithBlock(s.candidate, s.spec, s.block, payload)
+	}
+	return sniffShadowsocksAEADUDPTarget(s.spec, s.masterKey, payload)
 }
 
 func sniffShadowsocksAEADUDPTarget(spec ssCipherSpec, masterKey []byte, data []byte) (string, bool) {
@@ -55,20 +94,13 @@ func sniffShadowsocksAEADUDPTarget(spec ssCipherSpec, masterKey []byte, data []b
 	return target, ok
 }
 
-func sniffShadowsocks2022UDPTarget(config ShadowsocksSniffConfig, spec ssCipherSpec, data []byte) (string, bool) {
-	candidate, ok := shadowsocks2022UDPKeyCandidateFor(config.Password, spec.keySize)
-	if !ok {
-		return "", false
-	}
-	return sniffShadowsocks2022UDPTargetWithKey(candidate, spec, data)
-}
-
-func sniffShadowsocks2022UDPTargetWithKey(
+func sniffShadowsocks2022UDPTargetWithBlock(
 	candidate shadowsocks2022KeyCandidate,
 	spec ssCipherSpec,
+	block cipher.Block,
 	data []byte,
 ) (string, bool) {
-	plain, ok := decryptShadowsocks2022UDPPayload(candidate, spec, data)
+	plain, ok := decryptShadowsocks2022UDPPayload(candidate, spec, block, data)
 	if !ok {
 		return "", false
 	}
@@ -78,14 +110,14 @@ func sniffShadowsocks2022UDPTargetWithKey(
 func decryptShadowsocks2022UDPPayload(
 	candidate shadowsocks2022KeyCandidate,
 	spec ssCipherSpec,
+	block cipher.Block,
 	data []byte,
 ) ([]byte, bool) {
 	ciphertextStart := aes.BlockSize + candidate.eihLen
 	if len(data) < ciphertextStart+shadowsocks2022UDPHeaderLen+shadowsocksAEADTagSize {
 		return nil, false
 	}
-	block, err := aes.NewCipher(candidate.blockKey)
-	if err != nil {
+	if block == nil {
 		return nil, false
 	}
 	var packetHeader [aes.BlockSize]byte

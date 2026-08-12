@@ -59,8 +59,7 @@ func newNodeList(items []list.Item) list.Model {
 
 func nodeItemsWithCurrent(nodes []x365.Node, currentName string) []list.Item {
 	items := make([]list.Item, 0, len(nodes))
-	for i := range nodes {
-		node := nodes[i]
+	for _, node := range nodes {
 		items = append(items, nodeItem{node: node, isCurrent: currentName != "" && node.Name == currentName})
 	}
 	return items
@@ -164,8 +163,7 @@ func (m *Model) prepareNodeSelection() {
 }
 
 func (m *Model) selectNodeByName(name string) (x365.Node, bool) {
-	for i := range m.nodes {
-		node := m.nodes[i]
+	for i, node := range m.nodes {
 		if node.Name == name {
 			m.nodeList.Select(i)
 			return node, true

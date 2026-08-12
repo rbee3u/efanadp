@@ -14,6 +14,10 @@ import (
 	"github.com/rbee3u/efanadp/internal/x365"
 )
 
+const maxProxyTemplateBytes = 4 << 20
+
+var errProxyTemplateTooLarge = fmt.Errorf("proxies_tmpl exceeds %d-byte unpacked limit", maxProxyTemplateBytes)
+
 func proxyGroupsFromConfig(proxies yaml.MapSlice, encodedTemplate, uuid string) (yaml.MapSlice, error) {
 	if len(proxies) > 0 {
 		return proxies, nil
@@ -40,7 +44,7 @@ func proxiesFromTemplate(encoded, uuid string) (yaml.MapSlice, error) {
 	}
 	var tmpl yaml.MapSlice
 	if err := yaml.Unmarshal(decoded, &tmpl); err != nil {
-		return nil, fmt.Errorf("parse proxies_tmpl YAML: %w", err)
+		return nil, fmt.Errorf("parse proxies_tmpl YAML: %s", safeYAMLError(err))
 	}
 	if len(tmpl) == 0 {
 		return nil, errors.New("proxies_tmpl contains no proxy groups")
@@ -74,6 +78,9 @@ func unpackProxyTemplate(encoded string) ([]byte, error) {
 	if err == nil {
 		return unpacked, nil
 	}
+	if errors.Is(err, errProxyTemplateTooLarge) || len(decoded) > maxProxyTemplateBytes {
+		return nil, fmt.Errorf("decompress proxies_tmpl: %w", errProxyTemplateTooLarge)
+	}
 	if isLegacyProxyTemplateYAML(decoded) {
 		return decoded, nil
 	}
@@ -85,13 +92,16 @@ func unzipProxyTemplate(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, readErr := io.ReadAll(zr)
+	data, readErr := io.ReadAll(io.LimitReader(zr, maxProxyTemplateBytes+1))
 	closeErr := zr.Close()
 	if readErr != nil {
 		return nil, readErr
 	}
 	if closeErr != nil {
 		return nil, closeErr
+	}
+	if len(data) > maxProxyTemplateBytes {
+		return nil, errProxyTemplateTooLarge
 	}
 	return data, nil
 }

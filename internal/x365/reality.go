@@ -158,7 +158,7 @@ func dialReality(ctx context.Context, raw net.Conn, config *realityClientConfig)
 	hello.SessionId[2] = 6
 	hello.SessionId[3] = 0
 	now := time.Now().Unix()
-	if now < 0 || now > 1<<32-1 {
+	if now < 0 || now > int64(1<<32-1) {
 		return nil, fmt.Errorf("REALITY unix time out of uint32 range: %d", now)
 	}
 	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(now))

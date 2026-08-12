@@ -4,6 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -16,10 +20,27 @@ func socksReadConnect(reader *bufio.Reader, writer io.Writer) (string, int, erro
 		return "", 0, err
 	}
 	if request.Command != socksCommandConnect {
-		writeSOCKSReplyQuietly(writer, 7)
+		writeSOCKSReplyQuietly(writer, socksReplyCommandNotSupported)
 		return "", 0, fmt.Errorf("unsupported SOCKS5 command: %s", socksCommandName(request.Command))
 	}
 	return request.Host, request.Port, nil
+}
+
+// lookupTarget returns the cached target for key, or nil when the association
+// holds none, and marks a found target active. The relay path looks targets up
+// inside takeTargetForDatagram instead, so this exists only to let tests inspect
+// the target cache.
+func (a *udpAssociation) lookupTarget(key string) (*udpTarget, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.isClosed {
+		return nil, net.ErrClosed
+	}
+	target := a.targets[key]
+	if target != nil {
+		target.touch(time.Now())
+	}
+	return target, nil
 }
 
 func receiveWithin[T any](tb testing.TB, ch <-chan T, label string) T {
@@ -34,6 +55,20 @@ func receiveWithin[T any](tb testing.TB, ch <-chan T, label string) T {
 	return zero
 }
 
+// waitFor blocks until cond holds. UDP destinations are opened off the client
+// relay loop, so the effects of a forwarded datagram land after the call that
+// triggered it returns.
+func waitFor(tb testing.TB, cond func() bool, label string) {
+	tb.Helper()
+	deadline := time.Now().Add(testWaitTimeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			tb.Fatalf("timed out waiting for %s", label)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func requireNoReceive[T any](tb testing.TB, ch <-chan T, label string) {
 	tb.Helper()
 	select {
@@ -41,6 +76,42 @@ func requireNoReceive[T any](tb testing.TB, ch <-chan T, label string) {
 		tb.Fatalf("received %s: %v", label, value)
 	default:
 	}
+}
+
+// logRecorder collects formatted log lines from a Config logger.
+//
+// It is mutex-guarded because a UDP association logs from more goroutines than
+// the one under test: target opens run off the client relay loop and target
+// relays run per destination, so an unsynchronized slice append races the test
+// goroutine's own forwarding calls.
+type logRecorder struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (r *logRecorder) logger() testLogger {
+	return testLogger{log: func(_ string, format string, args ...any) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.lines = append(r.lines, fmt.Sprintf(format, args...))
+	}}
+}
+
+func (r *logRecorder) all() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.lines)
+}
+
+// count reports how many recorded lines contain substr.
+func (r *logRecorder) count(substr string) int {
+	n := 0
+	for _, line := range r.all() {
+		if strings.Contains(line, substr) {
+			n++
+		}
+	}
+	return n
 }
 
 func receiveMatchingWithin[T any](tb testing.TB, ch <-chan T, label string, matches func(T) bool) T {

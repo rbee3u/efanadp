@@ -66,23 +66,23 @@ type streamConns struct {
 
 // adopt records conn, or closes it right away when the stream is already gone.
 // http2 may dial more than once for a single request, so every conn is kept.
-func (s *streamConns) adopt(conn net.Conn) {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+func (sc *streamConns) adopt(conn net.Conn) {
+	sc.mu.Lock()
+	if sc.closed {
+		sc.mu.Unlock()
 		closeQuietly(conn)
 		return
 	}
-	s.conns = append(s.conns, conn)
-	s.mu.Unlock()
+	sc.conns = append(sc.conns, conn)
+	sc.mu.Unlock()
 }
 
-func (s *streamConns) closeAll() {
-	s.mu.Lock()
-	s.closed = true
-	conns := s.conns
-	s.conns = nil
-	s.mu.Unlock()
+func (sc *streamConns) closeAll() {
+	sc.mu.Lock()
+	sc.closed = true
+	conns := sc.conns
+	sc.conns = nil
+	sc.mu.Unlock()
 
 	for _, conn := range conns {
 		closeQuietly(conn)
@@ -102,12 +102,10 @@ func newXHTTPRealityRequest(ctx context.Context, node Node, body io.Reader) (*ht
 	if err != nil {
 		return nil, err
 	}
-	if node.Host != "" {
-		req.Host = node.Host
-	}
 	req.Header.Set("Content-Type", "application/grpc")
 	req.Header.Set("User-Agent", chromeUserAgent)
 	if node.Host != "" {
+		req.Host = node.Host
 		req.Header.Set("Referer", "https://"+node.Host+node.Path)
 	}
 	return req, nil
@@ -175,73 +173,73 @@ type httpStream struct {
 
 var _ io.ReadWriteCloser = (*httpStream)(nil)
 
-func (s *httpStream) Write(p []byte) (int, error) {
-	return s.requestWriter.Write(p)
+func (hs *httpStream) Write(p []byte) (int, error) {
+	return hs.requestWriter.Write(p)
 }
 
-func (s *httpStream) Read(p []byte) (int, error) {
-	if err := s.waitResponse(); err != nil {
+func (hs *httpStream) Read(p []byte) (int, error) {
+	if err := hs.waitResponse(); err != nil {
 		return 0, err
 	}
-	body := s.responseBody()
+	body := hs.responseBody()
 	if body == nil {
 		return 0, io.ErrClosedPipe
 	}
 	return body.Read(p)
 }
 
-func (s *httpStream) Close() error {
-	s.closeOnce.Do(func() {
-		if s.cancel != nil {
-			s.cancel()
+func (hs *httpStream) Close() error {
+	hs.closeOnce.Do(func() {
+		if hs.cancel != nil {
+			hs.cancel()
 		}
-		closeQuietly(s.requestWriter)
+		closeQuietly(hs.requestWriter)
 
-		s.mu.Lock()
-		s.isClosed = true
-		body := s.body
-		s.mu.Unlock()
+		hs.mu.Lock()
+		hs.isClosed = true
+		body := hs.body
+		hs.mu.Unlock()
 		if body != nil {
 			closeQuietly(body)
 		}
 		// Cancelling and closing the body lets h2 shut the stream down on its
 		// own terms; closing the socket afterwards is what guarantees the
 		// connection and its read loop actually go away.
-		if s.closeConns != nil {
-			s.closeConns()
+		if hs.closeConns != nil {
+			hs.closeConns()
 		}
 	})
 	return nil
 }
 
-func (s *httpStream) waitResponse() error {
-	<-s.responseDone
+func (hs *httpStream) waitResponse() error {
+	<-hs.responseDone
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.err
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	return hs.err
 }
 
-func (s *httpStream) setResponse(body io.ReadCloser, err error) {
-	s.mu.Lock()
-	s.body = body
-	s.err = err
-	closed := s.isClosed
-	s.mu.Unlock()
+func (hs *httpStream) setResponse(body io.ReadCloser, err error) {
+	hs.mu.Lock()
+	hs.body = body
+	hs.err = err
+	closed := hs.isClosed
+	hs.mu.Unlock()
 
 	if closed && body != nil {
 		closeQuietly(body)
 	}
-	close(s.responseDone)
+	close(hs.responseDone)
 }
 
-func (s *httpStream) responseBody() io.ReadCloser {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.body
+func (hs *httpStream) responseBody() io.ReadCloser {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	return hs.body
 }
 
-func (s *httpStream) startResponse(
+func (hs *httpStream) startResponse(
 	transport http.RoundTripper,
 	req *http.Request,
 	requestReader *io.PipeReader,
@@ -251,9 +249,9 @@ func (s *httpStream) startResponse(
 		if err != nil {
 			err = fmt.Errorf("http2 post: %w", err)
 			closePipeReaderWithError(requestReader, err)
-			s.setResponse(nil, err)
+			hs.setResponse(nil, err)
 			return
 		}
-		s.setResponse(body, nil)
+		hs.setResponse(body, nil)
 	}()
 }

@@ -177,12 +177,7 @@ func renderPaginationDots(page, count int) string {
 	if count < 2 {
 		return ""
 	}
-	if page < 0 {
-		page = 0
-	}
-	if page >= count {
-		page = count - 1
-	}
+	page = min(max(page, 0), count-1)
 	var b strings.Builder
 	for i := range count {
 		if i == page {

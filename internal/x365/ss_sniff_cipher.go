@@ -95,9 +95,6 @@ func shadowsocks2022UDPKeyCandidateFor(password string, keySize int) (shadowsock
 }
 
 func shadowsocks2022EIHLen(password string) int {
-	if strings.Count(password, ":") == 0 {
-		return 0
-	}
 	return 16 * strings.Count(password, ":")
 }
 

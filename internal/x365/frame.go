@@ -99,6 +99,11 @@ func (f *multipathFramer) dataFrameHeader(payloadLen int) ([frameHeaderSize]byte
 	return header, nil
 }
 
+// framePayloadLenUint64 widens a payload length for sequence arithmetic. Every
+// caller has already bounded payloadLen to [0, frameMaxPayload], either by an
+// explicit check or because parseFrameHeader builds it from three bytes, so the
+// negative branch is unreachable; it stays because it is what makes the
+// conversion provably safe to gosec's G115 check.
 func framePayloadLenUint64(payloadLen int) uint64 {
 	if payloadLen < 0 {
 		return 0

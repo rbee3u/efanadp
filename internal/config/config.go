@@ -66,9 +66,16 @@ type rawConfig struct {
 func readRawConfig(data []byte) (rawConfig, error) {
 	var raw rawConfig
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return rawConfig{}, fmt.Errorf("parse YAML: %w", err)
+		return rawConfig{}, fmt.Errorf("parse YAML: %s", safeYAMLError(err))
 	}
 	return raw, nil
+}
+
+// safeYAMLError keeps the parser's reason and source position without its
+// default source excerpt. Config lines can contain account and node material,
+// so returning the excerpt would leak private values through TUI or CLI errors.
+func safeYAMLError(err error) string {
+	return strings.TrimSpace(yaml.FormatError(err, false, false))
 }
 
 func parseConfigBytes(data []byte) (Config, error) {

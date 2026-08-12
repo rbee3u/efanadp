@@ -55,8 +55,9 @@ func openUDP(stream io.ReadWriteCloser, userID UserID, destHost string, destPort
 }
 
 type x365UDPConn struct {
-	stream  io.ReadWriteCloser
-	writeMu sync.Mutex
+	stream   io.ReadWriteCloser
+	writeMu  sync.Mutex
+	writeErr error
 
 	responseOnce sync.Once
 	responseErr  error
@@ -79,8 +80,20 @@ func (c *x365UDPConn) Read(p []byte) (int, error) {
 func (c *x365UDPConn) Write(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
+	if len(p) > x365UDPMaxPayload {
+		return 0, fmt.Errorf("X365 UDP payload too large: %d", len(p))
+	}
 
-	return writeX365UDPDatagram(c.stream, p)
+	n, err := writeX365UDPDatagram(c.stream, p)
+	if err != nil {
+		// Once any part of a length-prefixed datagram is written, the stream
+		// cannot be resynchronized. Preserve the first error and reject retries.
+		c.writeErr = err
+	}
+	return n, err
 }
 
 func (c *x365UDPConn) Close() error {

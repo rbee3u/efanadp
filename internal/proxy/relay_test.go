@@ -7,22 +7,42 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestUnexpectedEOFIsBenignClientError(t *testing.T) {
-	err := fmt.Errorf("relay failed: %w", io.ErrUnexpectedEOF)
-	if !isBenignClientError(err) {
-		t.Fatalf("expected unexpected EOF to be benign")
+// A benign error is one an ordinary client produces by disconnecting, so it is
+// classified rather than logged: the accept loop and every relay path use this to
+// decide whether a failure is worth a warning. Misclassifying either way is a
+// user-visible defect - a real upstream fault that stays silent, or a log filling
+// with lines for browsers closing tabs. Each case is wrapped because callers
+// always report through %w.
+func TestIsBenignClientError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "eof", err: io.EOF, want: true},
+		{name: "closed pipe", err: io.ErrClosedPipe, want: true},
+		{name: "unexpected eof", err: io.ErrUnexpectedEOF, want: true},
+		{name: "net closed", err: net.ErrClosed, want: true},
+		// The SOCKS handshake runs under a deadline, so a client that connects and
+		// then stalls times out on every attempt.
+		{name: "net timeout", err: os.ErrDeadlineExceeded, want: true},
+		// Matched by message because net/http2 does not export it.
+		{name: "http2 response body closed", err: errors.New("http2: response body closed"), want: true},
+		{name: "upstream failure is not benign", err: errors.New("bad X365 response"), want: false},
 	}
-}
 
-func TestHTTP2ResponseBodyClosedIsBenignClientError(t *testing.T) {
-	err := fmt.Errorf("relay failed: %w", errors.New("http2: response body closed"))
-	if !isBenignClientError(err) {
-		t.Fatalf("expected HTTP/2 response body close to be benign")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isBenignClientError(fmt.Errorf("relay failed: %w", tt.err)); got != tt.want {
+				t.Fatalf("isBenignClientError(%v)=%v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

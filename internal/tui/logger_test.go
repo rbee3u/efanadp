@@ -9,31 +9,24 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/natefinch/lumberjack.v2"
+
 	"github.com/rbee3u/efanadp/internal/config"
 )
 
+// The text format is what a user reads with tail, so the level and the formatted
+// message both have to be there. A nested output path is created rather than
+// failing, because the default output is logs/app.log under a fresh working
+// directory.
 func TestAppLoggerWritesTextLogFile(t *testing.T) {
-	usePlainLogFiles(t)
-
-	path := filepath.Join(t.TempDir(), "nested", "app.log")
-	logger, err := newAppLogger(config.LogConfig{
+	text := string(writeAppLog(t, config.LogConfig{
 		Level:  "info",
-		Output: path,
+		Output: filepath.Join(t.TempDir(), "nested", "app.log"),
 		Format: "text",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	logger.Infof("hello %s", "text")
-	if err := logger.Close(); err != nil {
-		t.Fatal(err)
-	}
+	}, func(logger *appLogger) {
+		logger.Infof("hello %s", "text")
+	}))
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(data)
 	for _, want := range []string{"level=INFO", "hello text"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("text log missing %q:\n%s", want, text)
@@ -41,27 +34,17 @@ func TestAppLoggerWritesTextLogFile(t *testing.T) {
 	}
 }
 
+// The json format feeds log collectors, so it has to be one parseable object per
+// line with the level and message in their own fields, not a formatted string.
 func TestAppLoggerWritesJSONLogFile(t *testing.T) {
-	usePlainLogFiles(t)
-
-	path := filepath.Join(t.TempDir(), "app.log")
-	logger, err := newAppLogger(config.LogConfig{
+	data := writeAppLog(t, config.LogConfig{
 		Level:  "info",
-		Output: path,
+		Output: filepath.Join(t.TempDir(), "app.log"),
 		Format: "json",
+	}, func(logger *appLogger) {
+		logger.Warnf("hello %s", "json")
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	logger.Warnf("hello %s", "json")
-	if err := logger.Close(); err != nil {
-		t.Fatal(err)
-	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var entry map[string]any
 	if err := json.Unmarshal(bytes.TrimSpace(data), &entry); err != nil {
 		t.Fatalf("parse json log: %v\n%s", err, data)
@@ -74,34 +57,73 @@ func TestAppLoggerWritesJSONLogFile(t *testing.T) {
 	}
 }
 
+// Relay logging is per-connection, so the configured level is what keeps a busy
+// run from filling the log with lines the user asked not to see.
 func TestAppLoggerFiltersByLevel(t *testing.T) {
-	usePlainLogFiles(t)
-
-	path := filepath.Join(t.TempDir(), "app.log")
-	logger, err := newAppLogger(config.LogConfig{
+	text := string(writeAppLog(t, config.LogConfig{
 		Level:  "warn",
-		Output: path,
+		Output: filepath.Join(t.TempDir(), "app.log"),
 		Format: "text",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	logger.Infof("hidden")
-	logger.Errorf("visible")
-	if err := logger.Close(); err != nil {
-		t.Fatal(err)
-	}
+	}, func(logger *appLogger) {
+		logger.Infof("hidden")
+		logger.Errorf("visible")
+	}))
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(data)
 	if strings.Contains(text, "hidden") {
 		t.Fatalf("info log was not filtered:\n%s", text)
 	}
 	if !strings.Contains(text, "visible") {
 		t.Fatalf("error log missing:\n%s", text)
+	}
+}
+
+// writeAppLog runs write against a logger built from cfg, then returns what landed
+// in cfg.Output. Rotation is replaced with a plain file so the bytes are readable
+// at a known path.
+func writeAppLog(t *testing.T, cfg config.LogConfig, write func(*appLogger)) []byte {
+	t.Helper()
+	usePlainLogFiles(t)
+
+	logger, err := newAppLogger(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(logger)
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(cfg.Output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// lumberjack retains every rotated file when MaxBackups and MaxAge are both
+// zero. Relay logs are per-connection, so an unbounded log directory is a
+// realistic way to fill a disk during a long run.
+func TestRotatingLogWriterBoundsRetainedFiles(t *testing.T) {
+	writer, err := newRotatingLogWriter(filepath.Join(t.TempDir(), "app.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = writer.Close()
+	}()
+
+	rotating, ok := writer.(*lumberjack.Logger)
+	if !ok {
+		t.Fatalf("writer type=%T, want *lumberjack.Logger", writer)
+	}
+	if rotating.MaxSize <= 0 {
+		t.Fatalf("MaxSize=%d, want a positive rotation size", rotating.MaxSize)
+	}
+	if rotating.MaxBackups <= 0 {
+		t.Fatalf("MaxBackups=%d, want a bound on retained files", rotating.MaxBackups)
+	}
+	if rotating.MaxAge <= 0 {
+		t.Fatalf("MaxAge=%d, want a bound on retained age", rotating.MaxAge)
 	}
 }
 
@@ -119,20 +141,30 @@ func usePlainLogFiles(t *testing.T) {
 	})
 }
 
+// The standard streams are borrowed, not owned, so logWriter must return no
+// closer for them: closing os.Stdout on a node switch would take the TUI's own
+// output with it for the rest of the process.
 func TestLogWriterSpecialOutputsDoNotCloseStdStreams(t *testing.T) {
-	writer, closer, err := logWriter("stdout")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if writer != os.Stdout || closer != nil {
-		t.Fatalf("stdout writer=%T closer=%T, want os.Stdout and nil closer", writer, closer)
+	tests := []struct {
+		output string
+		want   *os.File
+	}{
+		{output: "stdout", want: os.Stdout},
+		{output: "stderr", want: os.Stderr},
 	}
 
-	writer, closer, err = logWriter("stderr")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if writer != os.Stderr || closer != nil {
-		t.Fatalf("stderr writer=%T closer=%T, want os.Stderr and nil closer", writer, closer)
+	for _, tt := range tests {
+		t.Run(tt.output, func(t *testing.T) {
+			writer, closer, err := logWriter(tt.output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if writer != tt.want {
+				t.Fatalf("%s writer=%T, want %s", tt.output, writer, tt.output)
+			}
+			if closer != nil {
+				t.Fatalf("%s closer=%T, want nil so the stream is not closed", tt.output, closer)
+			}
+		})
 	}
 }

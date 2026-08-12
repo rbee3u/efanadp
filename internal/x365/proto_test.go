@@ -8,43 +8,112 @@ import (
 	"testing"
 )
 
-func TestBuildX365MultipathRequest(t *testing.T) {
+// These golden bytes are the reverse-engineered X365 request wire format, so they
+// are asserted literally rather than round-tripped: a round trip agrees with
+// itself even when both sides drift away from what the server accepts. The
+// address-type byte differs per host form (1 IPv4, 2 domain, 3 IPv6), and the
+// command byte selects the TCP or UDP path.
+func TestBuildX365Request(t *testing.T) {
+	const (
+		header = "58333635" + "01"
+		user   = "00112233445566778899aabbccddeeff"
+	)
+
 	userID, err := ParseUserID("00112233-4455-6677-8899-aabbccddeeff")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := buildX365Request(multipathControlHost, multipathControlPort, userID)
-	if err != nil {
-		t.Fatal(err)
+
+	tests := []struct {
+		name    string
+		host    string
+		port    int
+		command x365Command
+		want    string
+	}{
+		{
+			name:    "tcp multipath control host",
+			host:    multipathControlHost,
+			port:    multipathControlPort,
+			command: x365CommandTCP,
+			want:    header + "01" + user + "0001" + "02" + "12" + "6d756c7469706174682e696e7465726e616c",
+		},
+		{
+			name:    "udp domain",
+			host:    "example.com",
+			port:    53,
+			command: x365CommandUDP,
+			want:    header + "02" + user + "0035" + "02" + "0b" + "6578616d706c652e636f6d",
+		},
+		{
+			name:    "ipv4 host",
+			host:    "203.0.113.10",
+			port:    39281,
+			command: x365CommandTCP,
+			want:    header + "01" + user + "9971" + "01" + "cb00710a",
+		},
+		{
+			name:    "ipv6 host",
+			host:    "2001:db8::1",
+			port:    443,
+			command: x365CommandTCP,
+			want:    header + "01" + user + "01bb" + "03" + "20010db8000000000000000000000001",
+		},
 	}
-	wantHex := "58333635010100112233445566778899aabbccddeeff000102126d756c7469706174682e696e7465726e616c"
-	if gotHex := hex.EncodeToString(got); gotHex != wantHex {
-		t.Fatalf("request mismatch\nwant %s\n got %s", wantHex, gotHex)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := buildX365RequestWithCommand(tt.host, tt.port, userID, tt.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotHex := hex.EncodeToString(got); gotHex != tt.want {
+				t.Fatalf("request mismatch\nwant %s\n got %s", tt.want, gotHex)
+			}
+		})
 	}
+
+	// buildX365Request is the TCP entry point every multipath open uses, so it has
+	// to agree with the command it claims to send.
+	t.Run("tcp helper matches explicit command", func(t *testing.T) {
+		viaHelper, err := buildX365Request("example.com", 53, userID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		explicit, err := buildX365RequestWithCommand("example.com", 53, userID, x365CommandTCP)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(viaHelper, explicit) {
+			t.Fatalf("buildX365Request=%x, want the TCP command request %x", viaHelper, explicit)
+		}
+	})
 }
 
-func TestBuildX365UDPRequest(t *testing.T) {
+// An out-of-range port or an unknown command must fail before anything reaches
+// the wire, since a truncated or mislabeled request is what the server rejects.
+func TestBuildX365RequestRejectsBadInput(t *testing.T) {
 	userID, err := ParseUserID("00112233-4455-6677-8899-aabbccddeeff")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := buildX365RequestWithCommand("example.com", 53, userID, x365CommandUDP)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantHex := "58333635010200112233445566778899aabbccddeeff0035020b6578616d706c652e636f6d"
-	if gotHex := hex.EncodeToString(got); gotHex != wantHex {
-		t.Fatalf("request mismatch\nwant %s\n got %s", wantHex, gotHex)
-	}
-}
 
-func TestBuildX365RequestRejectsBadCommand(t *testing.T) {
-	userID, err := ParseUserID("00112233-4455-6677-8899-aabbccddeeff")
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name    string
+		port    int
+		command x365Command
+	}{
+		{name: "unknown command", port: 53, command: x365Command(9)},
+		{name: "negative port", port: -1, command: x365CommandTCP},
+		{name: "port overflow", port: 65536, command: x365CommandTCP},
 	}
-	if _, err := buildX365RequestWithCommand("example.com", 53, userID, x365Command(9)); err == nil {
-		t.Fatal("expected bad command error")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := buildX365RequestWithCommand("example.com", tt.port, userID, tt.command); err == nil {
+				t.Fatal("request build succeeded, want error")
+			}
+		})
 	}
 }
 

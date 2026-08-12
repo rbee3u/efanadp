@@ -110,32 +110,37 @@ func TestConnectionQueueCoalescesRepeatedUpdates(t *testing.T) {
 	}
 }
 
-// A dropped ConnectionClosed would leave its row active forever, so the whole
-// burst has to reach the model in one Update rather than one event per render.
-func TestConnectionEventBurstAppliesEveryCloseInOneUpdate(t *testing.T) {
-	model := newTestModel(Options{})
-	events := newConnectionQueue()
-	model.service = &runningService{id: 4, connectionEvents: events, eventsDone: make(chan struct{})}
-	startedAt := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+// The queue coalesces updates by tracking each connection's pending update index.
+// A closed connection never gets another update, so its entry has to go: a long
+// session of short-lived connections would otherwise grow the map without bound.
+func TestConnectionQueueForgetsClosedConnections(t *testing.T) {
+	queue := newConnectionQueue()
+	const connections = 100
 
-	burst := make([]proxy.Event, 0, 6)
-	for i := range 3 {
+	for i := range connections {
 		id := uint64(i + 1)
-		burst = append(
-			burst,
-			proxy.Event{ID: id, Type: proxy.ConnectionOpened, StartedAt: startedAt, Stats: &proxy.Stats{}},
-			proxy.Event{ID: id, Type: proxy.ConnectionClosed, StartedAt: startedAt, Stats: &proxy.Stats{}},
-		)
+		queue.push(proxy.Event{ID: id, Type: proxy.ConnectionOpened, Target: "example.org:443"})
+		for j := range 10 {
+			queue.push(proxy.Event{
+				ID:     id,
+				Type:   proxy.ConnectionUpdated,
+				Target: fmt.Sprintf("example.org:443->update-%d", j),
+			})
+		}
+		queue.push(proxy.Event{ID: id, Type: proxy.ConnectionClosed})
 	}
 
-	updated, _ := model.Update(connectionEventMsg{serviceID: 4, events: burst})
-	model = requireModel(t, updated)
-
-	if got := model.connections.activeCount(); got != 0 {
-		t.Fatalf("active connections=%d, want 0 after every close in the burst", got)
+	queue.mu.Lock()
+	tracked := len(queue.updates)
+	queue.mu.Unlock()
+	if tracked != 0 {
+		t.Fatalf("tracked update entries=%d after every connection closed, want 0", tracked)
 	}
-	if model.connections.closed != 3 {
-		t.Fatalf("closed connections=%d, want 3", model.connections.closed)
+
+	// Coalescing must not lose the lifecycle events themselves.
+	events := queue.take()
+	if len(events) != connections*3 {
+		t.Fatalf("queued events=%d, want %d (open + one coalesced update + close each)", len(events), connections*3)
 	}
 }
 
@@ -232,29 +237,20 @@ func TestRunningViewShowsPagedActiveConnections(t *testing.T) {
 
 	view := stripANSI(model.View())
 	if !strings.Contains(view, "Running · Active: 55 · Closed: 2 · URL: socks5://127.0.0.1:10865#efanadp") {
-		t.Fatalf("view missing English connection status:\n%s", view)
-	}
-	if strings.Contains(view, "upload=") || strings.Contains(view, "download=") {
-		t.Fatalf("view contains old transfer field names:\n%s", view)
+		t.Fatalf("view missing connection status summary:\n%s", view)
 	}
 	if !strings.Contains(view, "host=example.net") || !strings.Contains(view, "sni=example.net") {
 		t.Fatalf("view does not include node host and sni:\n%s", view)
 	}
-	if strings.Contains(view, "Active connections 1-30/55") {
-		t.Fatalf("view still shows connection page as a top title:\n%s", view)
-	}
-	if strings.Contains(view, "1-30/55") || strings.Contains(view, "page 1/2") {
-		t.Fatalf("view still shows the old text page summary:\n%s", view)
+	for _, header := range []string{"ID", "Type", "Source", "Target", "Age", "Up", "Down"} {
+		if !strings.Contains(view, header) {
+			t.Fatalf("view missing connection table header %q:\n%s", header, view)
+		}
 	}
 	if got := strings.Count(view, "•"); got != 2 {
 		t.Fatalf("first connection page dots=%d, want 2 (one per page):\n%s", got, view)
 	}
-	if !strings.Contains(view, "ID") || !strings.Contains(view, "Type") || !strings.Contains(view, "Source") || !strings.Contains(view, "Target") || !strings.Contains(view, "Age") || !strings.Contains(view, "Up") || !strings.Contains(view, "Down") {
-		t.Fatalf("view does not include connection table header:\n%s", view)
-	}
-	if strings.Contains(view, "source=") || strings.Contains(view, "target=") || strings.Contains(view, "time=") || strings.Contains(view, "up=") || strings.Contains(view, "down=") {
-		t.Fatalf("view contains field labels in connection data:\n%s", view)
-	}
+	// Newest first, 30 per page: the first page holds client-54 down to client-25.
 	if !strings.Contains(view, "client-54") || !strings.Contains(view, "client-25") {
 		t.Fatalf("view does not include first page connections:\n%s", view)
 	}
@@ -265,9 +261,6 @@ func TestRunningViewShowsPagedActiveConnections(t *testing.T) {
 	updated, _ := model.updateRunning(tea.KeyMsg{Type: tea.KeyPgDown})
 	model = requireModel(t, updated)
 	view = stripANSI(model.View())
-	if strings.Contains(view, "31-55/55") || strings.Contains(view, "page 2/2") {
-		t.Fatalf("view still shows the old text page summary:\n%s", view)
-	}
 	if got := strings.Count(view, "•"); got != 2 {
 		t.Fatalf("second connection page dots=%d, want 2 (one per page):\n%s", got, view)
 	}
@@ -316,25 +309,31 @@ func TestRunningViewAlwaysShowsPagingHelp(t *testing.T) {
 	}
 }
 
+// With nothing connected the table collapses to a placeholder rather than padding
+// out a full page of blank rows.
 func TestConnectionRowsUseCompactEmptyState(t *testing.T) {
 	var empty strings.Builder
 	writeConnectionRows(&empty, nil, time.Time{}, 100, 0, connectionPageSize, 0)
-	emptyView := stripANSI(empty.String())
-	if got := strings.Count(emptyView, "\n"); got >= connectionPageSize {
+
+	view := stripANSI(empty.String())
+	if got := strings.Count(view, "\n"); got >= connectionPageSize {
 		t.Fatalf("empty connection rows=%d, want compact empty state", got)
 	}
-	if !strings.Contains(emptyView, "No active connections") || !strings.Contains(emptyView, "local SOCKS5") {
-		t.Fatalf("empty connection rows missing placeholder:\n%s", emptyView)
+	if !strings.Contains(view, "No active connections") || !strings.Contains(view, "local SOCKS5") {
+		t.Fatalf("empty connection rows missing placeholder:\n%s", view)
 	}
-	for _, unexpected := range []string{"0/0", "page 0/0", "page 1/1"} {
-		if strings.Contains(emptyView, unexpected) {
-			t.Fatalf("empty connection rows should hide page summary %q:\n%s", unexpected, emptyView)
-		}
+	if strings.Contains(view, "•") {
+		t.Fatalf("empty connection rows should hide pagination:\n%s", view)
 	}
+}
 
+// One row renders its protocol, endpoints, age, and transfer counters as bare
+// values in table columns, and a single page shows no pagination.
+func TestConnectionRowsRenderSingleConnectionAsBareColumns(t *testing.T) {
 	stats := &proxy.Stats{}
 	stats.AddUpload(1536)
 	stats.AddDownload(42)
+
 	var one strings.Builder
 	writeConnectionRows(&one, []connectionItem{{
 		id:        1,
@@ -344,24 +343,18 @@ func TestConnectionRowsUseCompactEmptyState(t *testing.T) {
 		startedAt: time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC),
 		stats:     stats,
 	}}, time.Date(2026, 6, 30, 12, 0, 1, 0, time.UTC), 100, 0, connectionPageSize, 1)
-	oneView := stripANSI(one.String())
-	if got := strings.Count(oneView, "\n"); got >= 10 {
-		t.Fatalf("one connection rows=%d, want compact table:\n%s", got, oneView)
+
+	view := stripANSI(one.String())
+	if got := strings.Count(view, "\n"); got >= 10 {
+		t.Fatalf("one connection rows=%d, want compact table:\n%s", got, view)
 	}
-	if !strings.Contains(oneView, "client") || !strings.Contains(oneView, "example.com:443") {
-		t.Fatalf("one connection rows missing connection:\n%s", oneView)
+	for _, want := range []string{"udp", "client", "example.com:443", "1s", "1.5KiB", "42B"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("connection row missing %q:\n%s", want, view)
+		}
 	}
-	if !strings.Contains(oneView, "udp") {
-		t.Fatalf("one connection rows missing protocol type:\n%s", oneView)
-	}
-	if strings.Contains(oneView, "source=client") || strings.Contains(oneView, "time=1s") || strings.Contains(oneView, "up=1.5KiB") || strings.Contains(oneView, "down=42B") {
-		t.Fatalf("one connection rows still include field labels:\n%s", oneView)
-	}
-	if !strings.Contains(oneView, "1s") || !strings.Contains(oneView, "1.5KiB") || !strings.Contains(oneView, "42B") {
-		t.Fatalf("one connection rows missing unified fields:\n%s", oneView)
-	}
-	if strings.Contains(oneView, "•") || strings.Contains(oneView, "1-1/1") || strings.Contains(oneView, "page 1/1") {
-		t.Fatalf("single connection page should hide pagination:\n%s", oneView)
+	if strings.Contains(view, "•") {
+		t.Fatalf("single connection page should hide pagination:\n%s", view)
 	}
 }
 

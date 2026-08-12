@@ -11,7 +11,8 @@ import (
 )
 
 func TestSettingsRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "settings.json")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
 	want := appSettings{ConfigPath: "proxy.yaml", NodeName: "test-node"}
 
 	if err := saveSettings(path, want); err != nil {
@@ -24,6 +25,20 @@ func TestSettingsRoundTrip(t *testing.T) {
 	if got != want {
 		t.Fatalf("settings=%+v, want %+v", got, want)
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMode := info.Mode().Perm(); gotMode != 0o600 {
+		t.Fatalf("settings mode=%o, want 600", gotMode)
+	}
+	temps, err := filepath.Glob(filepath.Join(dir, ".settings-*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(temps) != 0 {
+		t.Fatalf("temporary settings files left behind: %v", temps)
+	}
 }
 
 func TestNewRuntimeConfigUsesWorkingDirectorySettingsPath(t *testing.T) {
@@ -33,55 +48,75 @@ func TestNewRuntimeConfigUsesWorkingDirectorySettingsPath(t *testing.T) {
 	}
 }
 
-func TestSaveSettingsFailureShowsWarning(t *testing.T) {
-	settingsPath := t.TempDir()
-	model := newTestModel(Options{})
-	model.config.settingsPath = settingsPath
-	model.config.configPath = "proxy.yaml"
-	model.rememberedNodeName = "test-node"
-	model.setStatus(statusSuccess, "Loaded config")
-
-	model.saveSettingsLogged()
-
-	if model.statusKind != statusWarning {
-		t.Fatalf("status kind=%v, want warning", model.statusKind)
+// A failed settings save costs the user their remembered node next launch, so it
+// is worth surfacing, but not at the price of hiding a problem they have not read
+// yet. The status line holds one message, so what is already on it decides:
+// nothing or a benign message gives way, a visible error or warning does not.
+// statusKind keeps its last value after clearStatus, so a cleared error must not
+// be mistaken for one still on screen.
+func TestSaveSettingsFailureWarningRespectsVisibleStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		// setup puts the model into the status state under test.
+		setup       func(m *Model)
+		wantWarning bool
+		wantStatus  string
+	}{
+		{
+			name:        "no status shows the warning",
+			setup:       func(*Model) {},
+			wantWarning: true,
+		},
+		{
+			name:        "benign status gives way",
+			setup:       func(m *Model) { m.setStatus(statusSuccess, "Loaded config") },
+			wantWarning: true,
+		},
+		{
+			name: "cleared error shows the warning",
+			setup: func(m *Model) {
+				m.setStatus(statusError, "Service exited")
+				m.clearStatus()
+			},
+			wantWarning: true,
+		},
+		{
+			name:       "visible error is kept",
+			setup:      func(m *Model) { m.setStatus(statusError, "Service exited: boom") },
+			wantStatus: "Service exited: boom",
+		},
+		{
+			name:       "visible warning is kept",
+			setup:      func(m *Model) { m.setStatus(statusWarning, "Node switch failed") },
+			wantStatus: "Node switch failed",
+		},
 	}
-	if !strings.Contains(model.status, "Failed to save settings") || !strings.Contains(model.status, "may not restore automatically") {
-		t.Fatalf("status=%q, want settings save warning", model.status)
-	}
-}
 
-func TestSaveSettingsFailureWarnsAfterStatusWasCleared(t *testing.T) {
-	settingsPath := t.TempDir()
-	model := newTestModel(Options{})
-	model.config.settingsPath = settingsPath
-	model.config.configPath = "proxy.yaml"
-	// A cleared error leaves statusKind behind; the warning is still the only
-	// thing the user can see, so it has to be shown.
-	model.setStatus(statusError, "Service exited")
-	model.clearStatus()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := newTestModel(Options{})
+			// A directory is not writable as a file, so the save always fails.
+			model.config.settingsPath = t.TempDir()
+			model.config.configPath = "proxy.yaml"
+			model.rememberedNodeName = "test-node"
+			tt.setup(model)
 
-	model.saveSettingsLogged()
+			model.saveSettingsLogged()
 
-	if model.statusKind != statusWarning {
-		t.Fatalf("status kind=%v, want warning", model.statusKind)
-	}
-	if !strings.Contains(model.status, "Failed to save settings") {
-		t.Fatalf("status=%q, want settings save warning", model.status)
-	}
-}
-
-func TestSaveSettingsFailureKeepsVisibleError(t *testing.T) {
-	settingsPath := t.TempDir()
-	model := newTestModel(Options{})
-	model.config.settingsPath = settingsPath
-	model.config.configPath = "proxy.yaml"
-	model.setStatus(statusError, "Service exited: boom")
-
-	model.saveSettingsLogged()
-
-	if model.status != "Service exited: boom" {
-		t.Fatalf("status=%q, want the visible error kept", model.status)
+			if !tt.wantWarning {
+				if model.status != tt.wantStatus {
+					t.Fatalf("status=%q, want the visible message kept: %q", model.status, tt.wantStatus)
+				}
+				return
+			}
+			if model.statusKind != statusWarning {
+				t.Fatalf("status kind=%v, want warning", model.statusKind)
+			}
+			if !strings.Contains(model.status, "Failed to save settings") ||
+				!strings.Contains(model.status, "may not restore automatically") {
+				t.Fatalf("status=%q, want settings save warning", model.status)
+			}
+		})
 	}
 }
 

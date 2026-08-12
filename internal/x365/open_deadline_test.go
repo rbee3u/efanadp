@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -32,40 +33,49 @@ func TestHandshakeWithDeadlineClosesStalledStream(t *testing.T) {
 	}
 }
 
+// The deadline must not outlive a handshake that succeeded: the returned stream
+// is a live relay connection, so a closer left armed would tear it down mid-relay
+// once the timeout elapsed. Running under synctest advances past the deadline
+// instantly, which is what makes the assertion able to fail at all - a wall-clock
+// wait shorter than the deadline would pass even with the closer still armed.
 func TestHandshakeWithDeadlineKeepsSuccessfulStreamOpen(t *testing.T) {
-	stream := newBlockingCloseNotifyStream()
-	conn, err := handshakeWithDeadline(t.Context(), time.Minute, stream, func() (io.ReadWriteCloser, error) {
-		return stream, nil
+	synctest.Test(t, func(t *testing.T) {
+		const timeout = time.Minute
+
+		stream := newBlockingCloseNotifyStream()
+		conn, err := handshakeWithDeadline(t.Context(), timeout, stream, func() (io.ReadWriteCloser, error) {
+			return stream, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if conn != stream {
+			t.Fatalf("conn=%v, want the handshake result", conn)
+		}
+
+		time.Sleep(2 * timeout)
+		synctest.Wait()
+
+		if got := stream.closeCount.Load(); got != 0 {
+			t.Fatalf("stream close count=%d, want 0 after a successful handshake", got)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if conn != stream {
-		t.Fatalf("conn=%v, want the handshake result", conn)
-	}
-	// The deadline must not outlive a handshake that succeeded.
-	time.Sleep(20 * time.Millisecond)
-	if got := stream.closeCount.Load(); got != 0 {
-		t.Fatalf("stream close count=%d, want 0 after a successful handshake", got)
-	}
 }
 
 // A cancelled parent must report cancellation, not a spurious timeout.
 func TestHandshakeWithDeadlineReportsParentCancellation(t *testing.T) {
 	stream := newBlockingCloseNotifyStream()
 	ctx, cancel := context.WithCancel(t.Context())
-	handshakeErr := errors.New("request cancelled")
 	go func() {
 		stream.waitForRead()
 		cancel()
 	}()
 
 	_, err := handshakeWithDeadline(ctx, time.Minute, stream, func() (io.ReadWriteCloser, error) {
-		_ = stream.readUntilClosed()
-		return nil, handshakeErr
+		return nil, stream.readUntilClosed()
 	})
-	if !errors.Is(err, handshakeErr) {
-		t.Fatalf("err=%v, want the handshake error", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want context.Canceled", err)
 	}
 	if errors.Is(err, errOpenTimeout) {
 		t.Fatal("parent cancellation was reported as a timeout")
@@ -88,6 +98,23 @@ func TestHandshakeWithDeadlineRejectsSuccessAfterDeadline(t *testing.T) {
 	}
 	if !errors.Is(err, errOpenTimeout) {
 		t.Fatalf("err=%v, want errOpenTimeout", err)
+	}
+}
+
+func TestHandshakeWithDeadlineRejectsSuccessAfterParentCancellation(t *testing.T) {
+	stream := newBlockingCloseNotifyStream()
+	ctx, cancel := context.WithCancel(t.Context())
+	conn, err := handshakeWithDeadline(ctx, time.Minute, stream, func() (io.ReadWriteCloser, error) {
+		cancel()
+		// Return success only after the cancellation closer has started.
+		<-stream.closed
+		return stream, nil
+	})
+	if conn != nil {
+		t.Fatal("handshake that finished after parent cancellation returned a connection")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want context.Canceled", err)
 	}
 }
 

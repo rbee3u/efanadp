@@ -32,32 +32,61 @@ func TestOpenUDPSendsCommandTwoRequest(t *testing.T) {
 	}
 }
 
-func TestOpenUDPSetupErrorsCloseAndWrap(t *testing.T) {
+// A UDP open is shorter than a multipath one - the X365 response read is deferred
+// to the first datagram read - but the same contract holds: a failure closes the
+// stream and names the step. Each cached UDP destination owns one of these
+// streams, so a leak here accumulates per destination rather than per connection.
+func TestOpenUDPFailuresCloseStreamAndNameStage(t *testing.T) {
+	errBoom := errors.New("write failed")
+
+	tests := []struct {
+		name      string
+		newStream func() closeCountingTestStream
+		destPort  int
+		want      string
+		wantIs    error
+	}{
+		{
+			name:      "build request",
+			newStream: func() closeCountingTestStream { return &memoryStream{} },
+			// An unencodable port fails before anything is written.
+			destPort: -1,
+			want:     "build x365 udp request",
+		},
+		{
+			name:      "write request",
+			newStream: func() closeCountingTestStream { return &writeErrorStream{err: errBoom} },
+			destPort:  53,
+			want:      "write x365 udp request",
+			wantIs:    errBoom,
+		},
+	}
+
 	userID, err := ParseUserID("00112233-4455-6677-8899-aabbccddeeff")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	stream := &memoryStream{}
-	_, err = openUDP(stream, userID, "example.com", -1)
-	if err == nil || !strings.Contains(err.Error(), "build x365 udp request") {
-		t.Fatalf("err=%v, want UDP request build context", err)
-	}
-	if stream.closeCount != 1 {
-		t.Fatalf("stream close count=%d, want 1", stream.closeCount)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := tt.newStream()
 
-	errBoom := errors.New("write failed")
-	writeStream := &writeErrorStream{err: errBoom}
-	_, err = openUDP(writeStream, userID, "example.com", 53)
-	if !errors.Is(err, errBoom) {
-		t.Fatalf("err=%v, want write failure in chain", err)
-	}
-	if !strings.Contains(err.Error(), "write x365 udp request") {
-		t.Fatalf("err=%v, want UDP write context", err)
-	}
-	if writeStream.closeCount != 1 {
-		t.Fatalf("write stream close count=%d, want 1", writeStream.closeCount)
+			conn, err := openUDP(stream, userID, "example.com", tt.destPort)
+
+			if err == nil {
+				closeQuietly(conn)
+				t.Fatal("openUDP succeeded, want a failure")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err=%v, want context %q", err, tt.want)
+			}
+			if tt.wantIs != nil && !errors.Is(err, tt.wantIs) {
+				t.Fatalf("err=%v, want %v in the chain", err, tt.wantIs)
+			}
+			if got := stream.closes(); got != 1 {
+				t.Fatalf("stream close count=%d, want 1", got)
+			}
+		})
 	}
 }
 
@@ -127,6 +156,33 @@ func TestX365UDPConnRejectsOversizedWrite(t *testing.T) {
 	_, err := conn.Write(bytes.Repeat([]byte("x"), x365UDPMaxPayload+1))
 	if err == nil || !strings.Contains(err.Error(), "payload too large") {
 		t.Fatalf("expected payload too large error, got %v", err)
+	}
+	if _, err := conn.Write([]byte("ok")); err != nil {
+		t.Fatalf("valid write after rejected oversized datagram: %v", err)
+	}
+	if got, want := stream.write.Bytes(), []byte{0, 2, 'o', 'k'}; !bytes.Equal(got, want) {
+		t.Fatalf("frame=%x, want %x", got, want)
+	}
+}
+
+func TestX365UDPConnWriteFailureIsTerminal(t *testing.T) {
+	errBoom := errors.New("payload write failed")
+	stream := &failNthRecordingStream{failOn: 2, err: errBoom}
+	conn := &x365UDPConn{stream: stream}
+
+	if _, err := conn.Write([]byte("abc")); !errors.Is(err, errBoom) {
+		t.Fatalf("first write err=%v, want %v", err, errBoom)
+	}
+	if _, err := conn.Write([]byte("retry")); !errors.Is(err, errBoom) {
+		t.Fatalf("retry err=%v, want original terminal error", err)
+	}
+
+	written := stream.bytes()
+	if want := []byte{0, 3}; !bytes.Equal(written, want) {
+		t.Fatalf("written bytes=%x, want only failed datagram header %x", written, want)
+	}
+	if got := stream.writeCalls(); got != 2 {
+		t.Fatalf("underlying write calls=%d, want header and failed payload only", got)
 	}
 }
 

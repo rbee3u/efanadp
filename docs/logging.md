@@ -12,9 +12,10 @@ Runtime logs are written to the configured `log.output`. The default is:
 logs/app.log
 ```
 
-`log.output` also accepts `stdout` and `stderr`. File outputs rotate at 100 MiB.
-`log.format` can be `text` or `json`, and `log.level` can be `debug`, `info`,
-`warn`/`warning`, or `error`.
+`log.output` also accepts `stdout` and `stderr`. File outputs rotate at 100 MiB
+and keep 4 rotated files for up to 30 days, so the log directory stays bounded
+at about 500 MiB. `log.format` can be `text` or `json`, and `log.level` can be
+`debug`, `info`, `warn`/`warning`, or `error`.
 
 The TUI uses stdout for rendering, so keep the default file output or use
 `stderr` if you want terminal logs while the TUI is running.
@@ -50,12 +51,60 @@ An idle `close idle` line means a cached UDP destination went quiet past the
 target idle timeout and its upstream stream was released. The next datagram for
 that destination reopens it, so this is routine cleanup rather than an error.
 
-A `UDP_ASSOCIATE` relay is pinned to the first source that sends a valid
-datagram. Datagrams from any other local source are dropped, warned once per
-association, and never forwarded:
+A `UDP_ASSOCIATE` relay accepts datagrams only from the TCP control client's IP.
+A non-zero source port in the request is enforced; otherwise the first valid
+datagram pins the source port. Datagrams from any other source are dropped,
+warned once per association, and never forwarded:
 
 ```text
 [udp] drop datagram from=127.0.0.1:61000 reason=not-associated-client client=127.0.0.1:57522
+```
+
+Every drop reason is warned about once per association, and the datagram named
+in that first line is the one that triggered it. Malformed packets, fragments,
+UDP/443, fake IPs, and foreign sources can repeat for every datagram a client
+keeps sending; a broken client or a browser retrying QUIC would otherwise write
+its send rate straight into the log file. Later drops for a reason already
+warned about are silent, and still dropped:
+
+```text
+[udp] drop malformed SOCKS5 datagram from=127.0.0.1:61000 err=SOCKS5 UDP packet too short: 1
+[udp] drop fragmented SOCKS5 datagram frag=1 target=203.0.113.10:39281
+[udp] drop target=203.0.113.10:443 reason=x365-udp-443-disabled
+[udp] drop fake-ip target=198.18.0.1:53
+[udp] drop target=203.0.113.10:39281 reason=target-not-ready
+[udp] drop target=203.0.113.10:39281 reason=target-limit
+```
+
+`target-not-ready` means a datagram arrived for a destination whose stream was
+still opening, and the queue of datagrams waiting on that open was already full.
+Opens run in the background so a handshake never blocks other destinations, and
+only one runs per destination at a time. Datagrams that arrive while an open is
+in flight queue onto it rather than being dropped, so a stub resolver's A and
+AAAA queries sent together both reach the destination on the first lookup. The
+queue has room for a handful; past that the client is outrunning a destination
+that is not answering yet, and later datagrams are dropped instead of spending
+memory to deliver a burst the client has already given up on. UDP clients
+retry.
+
+`target-limit` means the association already has 64 distinct destinations open
+or opening. New destinations are dropped so one client cannot create unbounded
+background handshakes and cached streams; existing destinations keep working.
+
+An `open target=` line is logged every time a destination opens, including a
+reopen after the idle sweep closed it, so a `close idle` line always has a
+matching reopen when traffic returns. The `(+N more)` count in the connection
+label counts destinations the association currently holds, not every one it has
+ever opened.
+
+When one association carries several inner destinations through a single
+Shadowsocks server, the connection label can only hold one at a time. Each
+distinct chain is reported once, and the label settles on the most recently
+discovered one. The first time the label moves between chains, that is noted
+once:
+
+```text
+[udp] label oscillation old=203.0.113.10:39281->a.example:5353 new=203.0.113.10:39281->b.example:5353
 ```
 
 A UDP destination reads its X365 response lazily, on the first packet back from

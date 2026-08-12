@@ -73,7 +73,12 @@ func TestSOCKS5ConnectAddressTypes(t *testing.T) {
 	}
 }
 
-func TestSOCKS5RequestRejectsMalformedAddress(t *testing.T) {
+// A rejected request must carry the right SOCKS5 reply code, because that code is
+// what the client reports: mihomo and curl surface "command not supported" (7)
+// and "address type not supported" (8) rather than hanging on a silent close.
+// Only CONNECT and UDP_ASSOCIATE are served, so BIND and anything unrecognized
+// are refused here rather than reaching a handler.
+func TestSOCKS5RequestRejectsBadRequests(t *testing.T) {
 	tests := []struct {
 		name      string
 		req       []byte
@@ -92,12 +97,30 @@ func TestSOCKS5RequestRejectsMalformedAddress(t *testing.T) {
 			wantReply: []byte{5, 8, 0, 1, 0, 0, 0, 0, 0, 0},
 			wantErr:   "empty SOCKS5 domain",
 		},
+		{
+			name:      "unsupported address type",
+			req:       []byte{5, 1, 0, 9, 127, 0, 0, 1, 0x01, 0xbb},
+			wantReply: []byte{5, 8, 0, 1, 0, 0, 0, 0, 0, 0},
+			wantErr:   "unsupported SOCKS5 address type: 9",
+		},
+		{
+			name:      "bind command",
+			req:       []byte{5, socksCommandBind, 0, 1, 127, 0, 0, 1, 0x01, 0xbb},
+			wantReply: []byte{5, 7, 0, 1, 0, 0, 0, 0, 0, 0},
+			wantErr:   "unsupported SOCKS5 command: BIND(2)",
+		},
+		{
+			name:      "unknown command",
+			req:       []byte{5, 9, 0, 1, 127, 0, 0, 1, 0x01, 0xbb},
+			wantReply: []byte{5, 7, 0, 1, 0, 0, 0, 0, 0, 0},
+			wantErr:   "unsupported SOCKS5 command: UNKNOWN(9)",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var output bytes.Buffer
-			_, _, err := socksReadConnect(bufio.NewReader(bytes.NewReader(tt.req)), &output)
+			_, err := socksReadRequest(bufio.NewReader(bytes.NewReader(tt.req)), &output)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("err=%v, want containing %q", err, tt.wantErr)
 			}
@@ -153,7 +176,7 @@ func TestParseSOCKS5UDPDatagramAddressTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseSocksUDPDatagram(tt.packet)
+			got, err := parseSOCKSUDPDatagram(tt.packet)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -164,6 +187,11 @@ func TestParseSOCKS5UDPDatagramAddressTypes(t *testing.T) {
 	}
 }
 
+// buildSOCKSUDPDatagram encodes its address through appendSOCKSAddress, so this
+// covers that encoder for every address type too. It does not replace
+// TestParseSOCKS5UDPDatagramAddressTypes: a round trip agrees with itself even if
+// both sides encode the wrong wire format, so the literal-bytes test is what
+// anchors the encoding to SOCKS5.
 func TestBuildSOCKS5UDPDatagramRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
@@ -176,11 +204,11 @@ func TestBuildSOCKS5UDPDatagramRoundTrip(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			packet, err := buildSocksUDPDatagram(tt.host, tt.port, []byte{0xaa, 0xbb})
+			packet, err := buildSOCKSUDPDatagram(tt.host, tt.port, []byte{0xaa, 0xbb})
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := parseSocksUDPDatagram(packet)
+			got, err := parseSOCKSUDPDatagram(packet)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -193,11 +221,11 @@ func TestBuildSOCKS5UDPDatagramRoundTrip(t *testing.T) {
 
 func TestBuildSOCKS5UDPHeaderMatchesDatagramEnvelope(t *testing.T) {
 	payload := []byte{0xaa, 0xbb}
-	header, err := buildSocksUDPHeader("example.com", 53)
+	header, err := buildSOCKSUDPHeader("example.com", 53)
 	if err != nil {
 		t.Fatal(err)
 	}
-	packet, err := buildSocksUDPDatagram("example.com", 53, payload)
+	packet, err := buildSOCKSUDPDatagram("example.com", 53, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,46 +235,29 @@ func TestBuildSOCKS5UDPHeaderMatchesDatagramEnvelope(t *testing.T) {
 	}
 }
 
-func TestAppendSOCKSAddressEncodesAddressTypes(t *testing.T) {
+// Every SOCKS5 address encoder funnels through appendSOCKSAddress, so rejecting
+// an unencodable address here is what keeps a malformed envelope off the wire.
+func TestAppendSOCKSAddressRejectsInvalidAddress(t *testing.T) {
 	tests := []struct {
 		name string
 		host string
 		port int
 	}{
-		{name: "ipv4", host: "127.0.0.1", port: 53},
-		{name: "domain", host: "example.com", port: 443},
-		{name: "ipv6", host: "2001:db8::1", port: 853},
+		{name: "negative port", host: "example.com", port: -1},
+		{name: "port overflow", host: "example.com", port: 65536},
+		{name: "domain too long", host: strings.Repeat("a", 256), port: 53},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			packet := make([]byte, 0, 4+len(tt.host)+2+1)
-			packet = append(packet, 0, 0, 0)
-			packet, err := appendSocksAddress(packet, tt.host, tt.port)
-			if err != nil {
-				t.Fatal(err)
+			if _, err := appendSOCKSAddress(nil, tt.host, tt.port); err == nil {
+				t.Fatalf("appendSOCKSAddress(%q, %d) succeeded, want error", tt.host, tt.port)
 			}
-			packet = append(packet, 0xaa)
-
-			got, err := parseSocksUDPDatagram(packet)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.Host != tt.host || got.Port != tt.port || !bytes.Equal(got.Payload, []byte{0xaa}) {
-				t.Fatalf("datagram=%+v, want host=%s port=%d payload=aa", got, tt.host, tt.port)
+			// The datagram builder shares the encoder, so it must reject the same
+			// address rather than emitting a truncated envelope.
+			if _, err := buildSOCKSUDPDatagram(tt.host, tt.port, nil); err == nil {
+				t.Fatalf("buildSOCKSUDPDatagram(%q, %d) succeeded, want error", tt.host, tt.port)
 			}
 		})
-	}
-}
-
-func TestAppendSOCKSAddressRejectsInvalidAddress(t *testing.T) {
-	if _, err := appendSocksAddress(nil, "example.com", -1); err == nil {
-		t.Fatal("expected negative port error")
-	}
-	if _, err := appendSocksAddress(nil, "example.com", 65536); err == nil {
-		t.Fatal("expected port overflow error")
-	}
-	if _, err := appendSocksAddress(nil, strings.Repeat("a", 256), 53); err == nil {
-		t.Fatal("expected domain length error")
 	}
 }
 
@@ -270,7 +281,7 @@ func TestWriteSOCKSReplyAddrEncodesBindAddress(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var output bytes.Buffer
-			if err := writeSocksReplyAddr(&output, 0, tt.addr); err != nil {
+			if err := writeSOCKSReplyAddr(&output, 0, tt.addr); err != nil {
 				t.Fatal(err)
 			}
 			if !bytes.Equal(output.Bytes(), tt.want) {
@@ -286,7 +297,7 @@ func TestParseSOCKS5UDPDatagramPayloadSharesPacketStorage(t *testing.T) {
 	packet = append(packet, []byte("example.com")...)
 	packet = append(packet, 0x00, 0x35, 0xaa, 0xbb)
 
-	got, err := parseSocksUDPDatagram(packet)
+	got, err := parseSOCKSUDPDatagram(packet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +309,7 @@ func TestParseSOCKS5UDPDatagramPayloadSharesPacketStorage(t *testing.T) {
 
 func TestParseSOCKS5UDPDatagramKeepsFragmentNumber(t *testing.T) {
 	packet := []byte{0, 0, 2, 1, 127, 0, 0, 1, 0x00, 0x35}
-	got, err := parseSocksUDPDatagram(packet)
+	got, err := parseSOCKSUDPDatagram(packet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,35 +346,15 @@ func TestSOCKS5UDPDatagramRejectsBadPackets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := parseSocksUDPDatagram(tt.packet); err == nil {
-				t.Fatalf("parseSocksUDPDatagram(%x) succeeded, want error", tt.packet)
+			if _, err := parseSOCKSUDPDatagram(tt.packet); err == nil {
+				t.Fatalf("parseSOCKSUDPDatagram(%x) succeeded, want error", tt.packet)
 			}
 		})
 	}
-	if _, err := buildSocksUDPDatagram("example.com", 70000, nil); err == nil {
-		t.Fatal("expected port range error")
-	}
 }
 
-func TestSOCKS5UDPAssociateIsReported(t *testing.T) {
-	var input bytes.Buffer
-	input.Write([]byte{5, 1, 0})
-	input.Write([]byte{5, 3, 0, 1, 127, 0, 0, 1, 0x1f, 0x90})
-
-	var output bytes.Buffer
-	reader := bufio.NewReader(&input)
-	if err := socksHandshake(reader, &output); err != nil {
-		t.Fatal(err)
-	}
-	_, _, err := socksReadConnect(reader, &output)
-	if err == nil || !strings.Contains(err.Error(), "UDP_ASSOCIATE") {
-		t.Fatalf("expected UDP_ASSOCIATE error, got %v", err)
-	}
-	if !bytes.Equal(output.Bytes(), []byte{5, 0, 5, 7, 0, 1, 0, 0, 0, 0, 0, 0}) {
-		t.Fatalf("bad response: %x", output.Bytes())
-	}
-}
-
+// A client asks for a relay with an unspecified address, and the server is what
+// supplies the real one, so the request itself must parse rather than be refused.
 func TestSOCKS5UDPAssociateRequestIsParsed(t *testing.T) {
 	request := []byte{5, socksCommandUDPAssociate, 0, 1, 0, 0, 0, 0, 0, 0}
 	got, err := socksReadRequest(bufio.NewReader(bytes.NewReader(request)), bytes.NewBuffer(nil))
@@ -390,14 +381,14 @@ func TestFakeIPHostDetection(t *testing.T) {
 
 func BenchmarkParseSOCKS5UDPDatagram(b *testing.B) {
 	payload := bytes.Repeat([]byte("x"), 1200)
-	packet, err := buildSocksUDPDatagram("example.com", 53, payload)
+	packet, err := buildSOCKSUDPDatagram("example.com", 53, payload)
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	b.ReportAllocs()
 	for b.Loop() {
-		got, err := parseSocksUDPDatagram(packet)
+		got, err := parseSOCKSUDPDatagram(packet)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -412,7 +403,7 @@ func BenchmarkBuildSOCKS5UDPDatagram(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		packet, err := buildSocksUDPDatagram("example.com", 53, payload)
+		packet, err := buildSOCKSUDPDatagram("example.com", 53, payload)
 		if err != nil {
 			b.Fatal(err)
 		}

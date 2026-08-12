@@ -227,6 +227,32 @@ func TestQuitWaitsForRunningServiceToStop(t *testing.T) {
 	requireQuitCommand(t, quitCmd)
 }
 
+// The first quit asks the service to stop and waits for it. A second one is the
+// user saying that is taking too long, and must be able to leave: without it a
+// wedged teardown leaves a TUI that cannot be closed and a port still bound.
+func TestSecondQuitRequestForcesQuit(t *testing.T) {
+	model := newTestModel(Options{
+		Timeout:          time.Second,
+		HandshakeTimeout: time.Second,
+	})
+	model.deps.serveSOCKS = fakeServeSOCKS
+
+	startCmd := model.requestStartNode(testNode(), "")
+	updated, quitCmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	model = requireModel(t, updated)
+	if quitCmd != nil {
+		t.Fatal("first quit returned a command before the service stopped")
+	}
+
+	// The service has not reported back, so the second request must not wait.
+	_, quitCmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	requireQuitCommand(t, quitCmd)
+
+	// Drain the start command so the fake service goroutine does not outlive the
+	// test.
+	serviceDoneFromStartCmd(t, startCmd)
+}
+
 func TestQuitDiscardsPendingNodeSwitch(t *testing.T) {
 	model := newTestModel(Options{
 		Timeout:          time.Second,

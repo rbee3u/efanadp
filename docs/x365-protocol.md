@@ -166,6 +166,8 @@ Write rules:
 - Maximum payload length is `0xffff`.
 - The length prefix is two bytes, big endian.
 - The prefix is not part of the returned payload byte count.
+- A failed frame write is terminal for that stream because retrying after a
+  partial length prefix or payload would corrupt every following boundary.
 
 Read rules:
 

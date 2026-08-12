@@ -112,11 +112,17 @@ func (m *Model) requestQuit() tea.Cmd {
 	if m.service == nil {
 		return tea.Quit
 	}
-	if m.state != stateQuitting {
-		m.state = stateQuitting
-		m.clearModeHint()
-		m.setStatus(statusInfo, "Stopping service before quit: "+m.service.node.Name)
-		m.stopService()
+	if m.state == stateQuitting {
+		// The first request already asked the service to stop, so this one says
+		// the shutdown is taking too long. Quitting abandons the service
+		// goroutine, which process exit reclaims anyway; without this the TUI
+		// cannot be closed at all if a teardown ever wedges.
+		m.logWarnf("[efanadp] quit requested again node=%s; abandoning service shutdown", m.service.node.Name)
+		return tea.Quit
 	}
+	m.state = stateQuitting
+	m.clearModeHint()
+	m.setStatus(statusInfo, "Stopping service before quit: "+m.service.node.Name+" (press again to force quit)")
+	m.stopService()
 	return nil
 }

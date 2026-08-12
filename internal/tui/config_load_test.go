@@ -30,6 +30,11 @@ func TestUserConfigLoadErrorMapsCommonConfigFailures(t *testing.T) {
 			want: "proxies_tmpl is not valid zlib-compressed template data",
 		},
 		{
+			name: "template too large",
+			err:  errors.New("config.yaml: decompress proxies_tmpl: proxies_tmpl exceeds 4194304-byte unpacked limit"),
+			want: "proxies_tmpl is too large",
+		},
+		{
 			name: "template yaml",
 			err:  errors.New("config.yaml: parse proxies_tmpl YAML: did not find expected key"),
 			want: "proxies_tmpl does not unpack to valid YAML",

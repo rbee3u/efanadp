@@ -30,13 +30,27 @@ type appLogger struct {
 	closer io.Closer
 }
 
+// Log rotation bounds. lumberjack retains every rotated file when MaxBackups
+// and MaxAge are both zero, so a chatty run would grow the log directory without
+// limit; relay logs are per-connection and per-dropped-datagram, which makes
+// that a realistic way to fill a disk. These caps keep the worst case at
+// MaxSize * (MaxBackups + 1) on disk while leaving enough history to diagnose a
+// problem reported after the fact.
+const (
+	logMaxSizeMB  = 100
+	logMaxBackups = 4
+	logMaxAgeDays = 30
+)
+
 var newRotatingLogWriter = func(output string) (io.WriteCloser, error) {
 	if err := os.MkdirAll(filepath.Dir(output), 0o700); err != nil {
 		return nil, err
 	}
 	return &lumberjack.Logger{
-		Filename: output,
-		MaxSize:  100,
+		Filename:   output,
+		MaxSize:    logMaxSizeMB,
+		MaxBackups: logMaxBackups,
+		MaxAge:     logMaxAgeDays,
 	}, nil
 }
 

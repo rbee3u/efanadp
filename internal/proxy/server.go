@@ -176,7 +176,7 @@ func handleSOCKSConn(ctx context.Context, client net.Conn, cfg Config) error {
 
 func handleSOCKSConnect(ctx context.Context, client net.Conn, reader *bufio.Reader, request socksRequest, cfg Config) error {
 	if isFakeIPHost(request.Host) {
-		writeSOCKSReplyQuietly(client, 4)
+		writeSOCKSReplyQuietly(client, socksReplyHostUnreachable)
 		return fmt.Errorf("SOCKS5 request got mihomo fake-ip %s; use socks5h:// so the proxy receives the domain", request.Host)
 	}
 
@@ -185,7 +185,7 @@ func handleSOCKSConnect(ctx context.Context, client net.Conn, reader *bufio.Read
 
 	upstream, err := cfg.dialMultipath(ctx, request.Host, request.Port)
 	if err != nil {
-		writeSOCKSReplyQuietly(client, 5)
+		writeSOCKSReplyQuietly(client, socksReplyConnectionRefused)
 		tracker.close(err)
 		return nil
 	}
@@ -195,7 +195,7 @@ func handleSOCKSConnect(ctx context.Context, client net.Conn, reader *bufio.Read
 	stopClosingUpstream := closeWhenContextDone(ctx, upstream)
 	defer stopClosingUpstream()
 
-	writeSOCKSReplyQuietly(client, 0)
+	writeSOCKSReplyQuietly(client, socksReplySucceeded)
 	err = relayMultipath(ctx, &bufferedConn{Conn: client, reader: reader}, upstream, tracker.stats, uploadObserverFor(cfg, request, tracker))
 	tracker.close(err)
 	return nil

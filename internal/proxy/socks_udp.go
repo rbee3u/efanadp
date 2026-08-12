@@ -13,7 +13,7 @@ type socksUDPDatagram struct {
 	Payload []byte
 }
 
-func parseSocksUDPDatagram(packet []byte) (socksUDPDatagram, error) {
+func parseSOCKSUDPDatagram(packet []byte) (socksUDPDatagram, error) {
 	if len(packet) < 4 {
 		return socksUDPDatagram{}, fmt.Errorf("SOCKS5 UDP packet too short: %d", len(packet))
 	}
@@ -23,13 +23,13 @@ func parseSocksUDPDatagram(packet []byte) (socksUDPDatagram, error) {
 	result := socksUDPDatagram{Frag: packet[2]}
 	offset := 4
 	switch packet[3] {
-	case 1:
+	case socksAddrIPv4:
 		if len(packet) < offset+4+2 {
 			return socksUDPDatagram{}, fmt.Errorf("SOCKS5 UDP IPv4 packet too short: %d", len(packet))
 		}
 		result.Host = net.IP(packet[offset : offset+4]).String()
 		offset += 4
-	case 3:
+	case socksAddrDomain:
 		if len(packet) < offset+1 {
 			return socksUDPDatagram{}, errors.New("SOCKS5 UDP domain length missing")
 		}
@@ -45,7 +45,7 @@ func parseSocksUDPDatagram(packet []byte) (socksUDPDatagram, error) {
 		}
 		result.Host = string(packet[offset : offset+hostLen])
 		offset += hostLen
-	case 4:
+	case socksAddrIPv6:
 		if len(packet) < offset+16+2 {
 			return socksUDPDatagram{}, fmt.Errorf("SOCKS5 UDP IPv6 packet too short: %d", len(packet))
 		}
@@ -63,9 +63,9 @@ func parseSocksUDPDatagram(packet []byte) (socksUDPDatagram, error) {
 	return result, nil
 }
 
-func buildSocksUDPDatagram(host string, port int, payload []byte) ([]byte, error) {
+func buildSOCKSUDPDatagram(host string, port int, payload []byte) ([]byte, error) {
 	packet := make([]byte, 0, socksUDPHeaderCapacity(host)+len(payload))
-	packet, err := appendSocksUDPHeader(packet, host, port)
+	packet, err := appendSOCKSUDPHeader(packet, host, port)
 	if err != nil {
 		return nil, err
 	}
@@ -73,18 +73,18 @@ func buildSocksUDPDatagram(host string, port int, payload []byte) ([]byte, error
 	return packet, nil
 }
 
-func buildSocksUDPHeader(host string, port int) ([]byte, error) {
+func buildSOCKSUDPHeader(host string, port int) ([]byte, error) {
 	header := make([]byte, 0, socksUDPHeaderCapacity(host))
-	return appendSocksUDPHeader(header, host, port)
+	return appendSOCKSUDPHeader(header, host, port)
 }
 
 func socksUDPHeaderCapacity(host string) int {
 	return 4 + max(len(host)+1, net.IPv6len) + 2
 }
 
-func appendSocksUDPHeader(dst []byte, host string, port int) ([]byte, error) {
+func appendSOCKSUDPHeader(dst []byte, host string, port int) ([]byte, error) {
 	dst = append(dst, 0, 0, 0)
-	dst, err := appendSocksAddress(dst, host, port)
+	dst, err := appendSOCKSAddress(dst, host, port)
 	if err != nil {
 		return nil, fmt.Errorf("SOCKS5 UDP address: %w", err)
 	}

@@ -1,6 +1,7 @@
 package x365
 
 import (
+	"crypto/aes"
 	"errors"
 	"io"
 	"testing"
@@ -68,6 +69,42 @@ func sniffShadowsocks2022Target(config ShadowsocksSniffConfig, spec ssCipherSpec
 		return "", sniffFailed
 	}
 	return sniffShadowsocks2022TargetWithKey(candidate, spec, data)
+}
+
+// sniffShadowsocksUDPTarget derives the key material for config and sniffs one
+// datagram with it. Production sniffing goes through ShadowsocksUDPSniffer,
+// which derives that material once per destination instead of once per datagram;
+// this keeps the per-datagram form available to tests that check a single packet.
+func sniffShadowsocksUDPTarget(config ShadowsocksSniffConfig, data []byte) (string, bool) {
+	spec, ok := ssCipherSpecForMethod(config.Method)
+	if !ok {
+		return "", false
+	}
+	if spec.is2022 {
+		return sniffShadowsocks2022UDPTarget(config, spec, data)
+	}
+	masterKey := evpBytesToKey([]byte(config.Password), spec.keySize)
+	return sniffShadowsocksAEADUDPTarget(spec, masterKey, data)
+}
+
+func sniffShadowsocks2022UDPTarget(config ShadowsocksSniffConfig, spec ssCipherSpec, data []byte) (string, bool) {
+	candidate, ok := shadowsocks2022UDPKeyCandidateFor(config.Password, spec.keySize)
+	if !ok {
+		return "", false
+	}
+	return sniffShadowsocks2022UDPTargetWithKey(candidate, spec, data)
+}
+
+func sniffShadowsocks2022UDPTargetWithKey(
+	candidate shadowsocks2022KeyCandidate,
+	spec ssCipherSpec,
+	data []byte,
+) (string, bool) {
+	block, err := aes.NewCipher(candidate.blockKey)
+	if err != nil {
+		return "", false
+	}
+	return sniffShadowsocks2022UDPTargetWithBlock(candidate, spec, block, data)
 }
 
 func deriveShadowsocksSubkey(password string, salt []byte, keySize int) ([]byte, error) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -72,13 +73,17 @@ type multipathConn struct {
 	framer    *multipathFramer
 	readBuf   []byte
 	writeMu   sync.Mutex
+	writeErr  error
 	closeOnce sync.Once
 	closeErr  error
+	closed    atomic.Bool
 
 	acks *ackQueue
 }
 
 var _ io.ReadWriteCloser = (*multipathConn)(nil)
+
+const multipathCloseFrameTimeout = 100 * time.Millisecond
 
 func newMultipathConn(stream io.ReadWriteCloser, framer *multipathFramer) *multipathConn {
 	conn := &multipathConn{
@@ -125,12 +130,24 @@ func (c *multipathConn) Read(p []byte) (int, error) {
 func (c *multipathConn) Write(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if c.closed.Load() {
+		return 0, io.ErrClosedPipe
+	}
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
 
+	previousSeq := c.framer.WriteSeq
 	header, err := c.framer.dataFrameHeader(len(p))
 	if err != nil {
 		return 0, err
 	}
 	if err := c.writeDataFrameLocked(header, p); err != nil {
+		// A frame is only part of the stream once its header and payload have both
+		// been written. Preserve the last committed sequence and make the write
+		// failure terminal: retrying after a partial frame would corrupt framing.
+		c.framer.WriteSeq = previousSeq
+		c.writeErr = err
 		return 0, err
 	}
 	return len(p), nil
@@ -138,18 +155,47 @@ func (c *multipathConn) Write(p []byte) (int, error) {
 
 func (c *multipathConn) Close() error {
 	c.closeOnce.Do(func() {
-		if c.writeMu.TryLock() {
-			frame := c.framer.closeFrameHeader()
-			_ = c.writeFrameLocked(frame[:])
-			c.writeMu.Unlock()
+		c.closed.Store(true)
+		closeFrameDone := c.startCloseFrame()
+		if closeFrameDone != nil {
+			timer := time.NewTimer(multipathCloseFrameTimeout)
+			select {
+			case <-closeFrameDone:
+				timer.Stop()
+			case <-timer.C:
+			}
 		}
 		// Close the stream before stopping the ACK sender: that releases a write
 		// blocked in the flow-control window, which is what lets a send already
 		// waiting on the write lock finish and the sender goroutine return.
 		c.closeErr = c.stream.Close()
+		if closeFrameDone != nil {
+			<-closeFrameDone
+		}
 		c.acks.stop()
 	})
 	return c.closeErr
+}
+
+// startCloseFrame writes the graceful close off the caller goroutine. Even an
+// otherwise idle connection can have its next HTTP/2 write parked behind flow
+// control, so Close only waits briefly before closing the stream to release it.
+func (c *multipathConn) startCloseFrame() <-chan struct{} {
+	if !c.writeMu.TryLock() {
+		return nil
+	}
+	if c.writeErr != nil {
+		c.writeMu.Unlock()
+		return nil
+	}
+	done := make(chan struct{})
+	frame := c.framer.closeFrameHeader()
+	go func() {
+		defer close(done)
+		defer c.writeMu.Unlock()
+		_ = c.writeFrameLocked(frame[:])
+	}()
+	return done
 }
 
 func (c *multipathConn) writeFrameLocked(frame []byte) error {
@@ -216,12 +262,22 @@ func (c *multipathConn) flushACK() error {
 // flushACKLocked writes the queued sequence, if any. Taking and writing under
 // the same lock keeps two flushers from reordering their ACKs on the wire.
 func (c *multipathConn) flushACKLocked() error {
+	if c.closed.Load() {
+		return io.ErrClosedPipe
+	}
+	if c.writeErr != nil {
+		return c.writeErr
+	}
 	seq, ok := c.acks.take()
 	if !ok {
 		return nil
 	}
 	ack := ackFrameHeader(seq)
-	return c.writeFrameLocked(ack[:])
+	if err := c.writeFrameLocked(ack[:]); err != nil {
+		c.writeErr = err
+		return err
+	}
+	return nil
 }
 
 func (c *multipathConn) readBuffered(p []byte) int {
