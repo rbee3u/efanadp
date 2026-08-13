@@ -103,6 +103,10 @@ func (c *x365UDPConn) Close() error {
 	return c.closeErr
 }
 
+// readX365UDPDatagram reads one length-prefixed datagram. A payload larger than
+// p is truncated to len(p) and its remainder discarded to keep the stream framed,
+// which is silent and unrecoverable: callers must size p for the x365UDPMaxPayload
+// maximum so a valid datagram never loses bytes.
 func readX365UDPDatagram(r io.Reader, p []byte) (int, error) {
 	var header [2]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {

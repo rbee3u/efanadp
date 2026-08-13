@@ -135,6 +135,10 @@ func socksReadRequest(reader *bufio.Reader, writer io.Writer) (socksRequest, err
 	}, nil
 }
 
+// isFakeIPHost reports whether host is in 198.18.0.0/15, the range mihomo hands
+// out for fake-IP DNS. Such an address is only meaningful to the local resolver
+// that minted it, so the upstream node cannot map it back to a domain and the
+// request is refused rather than relayed to a nonexistent destination.
 func isFakeIPHost(host string) bool {
 	ip := net.ParseIP(host).To4()
 	if ip == nil {

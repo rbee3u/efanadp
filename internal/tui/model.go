@@ -1,3 +1,9 @@
+// Package tui implements the Bubble Tea interface and owns the process
+// lifecycle: startup config resolution and loading, node selection and
+// switching, persisted settings, the log sink, and the connection table.
+//
+// One Model drives every view state. Config is read once at startup, so file
+// edits take effect on restart rather than being reloaded.
 package tui
 
 import (
@@ -9,6 +15,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// Model is the Bubble Tea model for the whole interface. Its methods run on the
+// single event loop goroutine and must not block; background work belongs in a
+// tea.Cmd that reports back as a message.
 type Model struct {
 	config runtimeConfig
 	deps   modelDeps

@@ -9,6 +9,12 @@ import (
 
 type relayTask func() error
 
+// runRelayPair runs both directions and returns once both have finished. stop
+// runs after whichever direction ends first, so the caller uses it to unblock the
+// other; it is wrapped to run once, letting each task call it unconditionally.
+// The reported error is the first one worth surfacing: a direction ending because
+// its peer went away is expected here, so benign errors are filtered and a clean
+// shutdown reports nil.
 func runRelayPair(stop func(), left, right relayTask) error {
 	if stop != nil {
 		stop = sync.OnceFunc(stop)

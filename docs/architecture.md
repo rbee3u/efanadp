@@ -140,6 +140,12 @@ For SOCKS5 `UDP_ASSOCIATE`, the adapter:
 7. Rebuilds SOCKS5 UDP envelopes around response payloads.
 8. Closes cached targets that stay idle past the UDP target idle timeout.
 
+A failed send to the local client drops that response and keeps the destination
+cached, because the association socket is shared by every destination while the
+failure belongs to one datagram; only a finished socket ends the destination. An
+upstream response at the X365 maximum reaches this, since the added SOCKS
+envelope pushes it past the 65507-byte datagram limit.
+
 The direct X365 UDP stream sends command `0x02` to the actual UDP target and
 frames each datagram as `uint16_be(payload_len) payload`. Its X365 response is
 read lazily, on the first read from the target, so a refused destination is
@@ -196,15 +202,21 @@ Every X365 stream is carried over xhttp + REALITY:
 The HTTP response must be `200 OK`; after that, the request body and response
 body are treated as a bidirectional byte stream.
 
-Opening a stream is deadline-bounded as a whole, not just at the TCP dial.
+TCP stream opening is deadline-bounded as a whole, not just at the TCP dial.
 `net/http2` has no response-header timeout, so a node that completes TCP and
 REALITY but never answers the X365 request would otherwise block the caller with
 no deadline, pinning a SOCKS handler, its client connection, a goroutine, and the
-stream until the service stops. The open deadline covers the REALITY handshake,
-the response headers, the X365 request write, and the X365 response read; on
-expiry it closes the stream, which unblocks whichever of those steps was waiting.
-A stream that opens successfully is never closed by this deadline, and a
-cancellation from the caller is still reported as a cancellation.
+stream until the service stops. The TCP open deadline covers the REALITY
+handshake, response headers, X365 request write, and X365 response read; on
+expiry it closes the stream, which unblocks whichever step was waiting. A
+stream that opens successfully is never closed by this deadline, and caller
+cancellation is still reported as cancellation.
+
+UDP opening uses the same deadline while establishing the outer transport and
+writing the X365 request, but deliberately returns before reading the HTTP/X365
+response. The target relay consumes that response on its first read; if it
+never arrives, the UDP target idle sweep closes the stream. This preserves the
+lazy UDP behavior described above without leaving the target cached forever.
 
 ## Observability
 

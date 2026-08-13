@@ -222,6 +222,7 @@ const (
 	dropReasonForeign        = "not-associated-client"
 	dropReasonTargetNotReady = "target-not-ready"
 	dropReasonTargetLimit    = "target-limit"
+	dropReasonClientWrite    = "client-write"
 )
 
 func (a *udpAssociation) shouldDropClientDatagram(datagram socksUDPDatagram) bool {

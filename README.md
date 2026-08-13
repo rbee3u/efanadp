@@ -89,6 +89,9 @@ Optional runtime fields include `listen` (default `127.0.0.1:10865`), `log`
 for level/output/format, and `sniff.shadowsocks` for display-only inner target
 sniffing behind a Shadowsocks landing server.
 
+Keep `listen` on a loopback address. The adapter supports SOCKS5 no-auth only;
+binding it to a non-loopback address is not a supported multi-user deployment.
+
 See [configuration](docs/configuration.md) for the full config reference.
 
 ## Useful Commands

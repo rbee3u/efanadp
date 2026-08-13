@@ -1,3 +1,6 @@
+// Command efanadp runs a local SOCKS5 adapter that carries traffic through
+// decrypted efanapp x365 nodes. With no arguments it launches the interactive
+// TUI; see internal/app for the supported subcommands.
 package main
 
 import (

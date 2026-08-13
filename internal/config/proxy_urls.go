@@ -14,6 +14,9 @@ import (
 	"github.com/rbee3u/efanadp/internal/x365"
 )
 
+// maxProxyTemplateBytes bounds the unpacked template. The packed field is
+// attacker-editable local text that startup decompresses before parsing, so a
+// small crafted payload would otherwise expand without limit.
 const maxProxyTemplateBytes = 4 << 20
 
 var errProxyTemplateTooLarge = fmt.Errorf("proxies_tmpl exceeds %d-byte unpacked limit", maxProxyTemplateBytes)
@@ -72,6 +75,10 @@ func packProxyTemplate(data []byte) (string, error) {
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
+// unpackProxyTemplate decodes the packed template, accepting the older
+// uncompressed base64 YAML form so a config.yaml copied from a pre-compression
+// reference file keeps loading. The size limit is applied first either way, so
+// the legacy path cannot be used to bypass it.
 func unpackProxyTemplate(encoded string) ([]byte, error) {
 	decoded, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {

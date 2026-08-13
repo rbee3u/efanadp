@@ -56,6 +56,7 @@ func parseShadowsocksTargetAddress(payload []byte) (string, bool) {
 	return net.JoinHostPort(host, strconv.Itoa(int(port))), true
 }
 
+// FormatTargetChain builds a display-only outer->inner target label.
 func FormatTargetChain(outer, inner string) string {
 	if inner == "" || inner == outer {
 		return outer

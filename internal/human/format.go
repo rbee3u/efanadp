@@ -1,3 +1,5 @@
+// Package human formats byte counts, durations, and text for display in the TUI
+// and in maintenance command output.
 package human
 
 import (

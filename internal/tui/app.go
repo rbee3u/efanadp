@@ -13,9 +13,16 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// Options supplies startup paths and network timeouts for Run.
 type Options struct {
-	ConfigPath       string
-	Timeout          time.Duration
+	// ConfigPath overrides settings.json and the default config.yaml when set.
+	ConfigPath string
+
+	// Timeout bounds X365 transport opening. Non-positive values disable it.
+	Timeout time.Duration
+
+	// HandshakeTimeout bounds the local SOCKS greeting and request. Non-positive
+	// values disable it.
 	HandshakeTimeout time.Duration
 }
 
@@ -30,6 +37,8 @@ type startupConfig struct {
 	settingsErr error
 }
 
+// Run loads one configuration snapshot and owns the terminal until the Bubble
+// Tea program exits. Configuration changes require a new call to Run.
 func Run(opts Options) error {
 	startup, err := prepareStartup(opts)
 	if err != nil {

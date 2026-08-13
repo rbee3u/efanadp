@@ -30,6 +30,8 @@ const (
 	sniffFailed
 )
 
+// ShadowsocksTargetSniffer incrementally inspects one client-to-server stream.
+// It reports at most one target and is not safe for concurrent use.
 type ShadowsocksTargetSniffer struct {
 	spec      ssCipherSpec
 	limit     int
@@ -39,6 +41,8 @@ type ShadowsocksTargetSniffer struct {
 	done      bool
 }
 
+// NewShadowsocksTargetSniffer returns a sniffer for the matching landing server,
+// or nil when no usable entry matches. Observe is safe to call on a nil sniffer.
 func NewShadowsocksTargetSniffer(configs []ShadowsocksSniffConfig, host string, port int) *ShadowsocksTargetSniffer {
 	config, ok := matchingShadowsocksSniffConfig(configs, host, port)
 	if !ok {
@@ -79,6 +83,8 @@ func matchingShadowsocksSniffConfig(configs []ShadowsocksSniffConfig, host strin
 	return ShadowsocksSniffConfig{}, false
 }
 
+// Observe consumes the next stream bytes and reports the inner target once. A
+// false result does not distinguish incomplete input from terminal mismatch.
 func (s *ShadowsocksTargetSniffer) Observe(p []byte) (string, bool) {
 	if s == nil || s.done || len(p) == 0 {
 		return "", false

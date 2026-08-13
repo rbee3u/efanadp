@@ -44,7 +44,7 @@ target:
 [udp] open target=203.0.113.10:39281
 [udp] sniff target=203.0.113.10:39281->stun.example.org:3478
 [udp #31] update source=127.0.0.1:57522 target=203.0.113.10:39281->stun.example.org:3478
-[udp] close idle target=203.0.113.10:39281 idle=90.0s
+[udp] close idle target=203.0.113.10:39281 idle=1m30s
 ```
 
 An idle `close idle` line means a cached UDP destination went quiet past the
@@ -74,6 +74,7 @@ warned about are silent, and still dropped:
 [udp] drop fake-ip target=198.18.0.1:53
 [udp] drop target=203.0.113.10:39281 reason=target-not-ready
 [udp] drop target=203.0.113.10:39281 reason=target-limit
+[udp] drop response target=203.0.113.10:39281 reason=client-write err=... sendto: message too long
 ```
 
 `target-not-ready` means a datagram arrived for a destination whose stream was
@@ -90,6 +91,13 @@ retry.
 `target-limit` means the association already has 64 distinct destinations open
 or opening. New destinations are dropped so one client cannot create unbounded
 background handshakes and cached streams; existing destinations keep working.
+
+`client-write` means a response arrived from the upstream but the send to the
+local client failed. The destination stays cached and the relay continues with
+the next response, because the association socket is shared by every destination
+and the failure belongs to the one datagram. An upstream response at the X365
+maximum reaches this: the added SOCKS envelope pushes it past the 65507-byte
+datagram limit and the send reports `EMSGSIZE`.
 
 An `open target=` line is logged every time a destination opens, including a
 reopen after the idle sweep closed it, so a `close idle` line always has a

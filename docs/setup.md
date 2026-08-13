@@ -98,7 +98,7 @@ Node list screen:
 - `Enter`: start the selected node, or confirm a node switch while the current
   service keeps running until the switch is confirmed.
 - `esc`: cancel back to the running service while one is active.
-- `q`: quit.
+- `q`: quit when search mode is not active.
 
 Running screen:
 
@@ -106,6 +106,10 @@ Running screen:
 - `s`: choose another node while keeping the current one running until
   confirmed.
 - `q`: quit.
+
+`Ctrl+C` also quits, including from search mode. Quitting first asks the running
+service to stop cleanly; if shutdown stalls, press `q` or `Ctrl+C` again to
+force the TUI to exit.
 
 To apply config file changes, stop `efanadp` and start it again.
 

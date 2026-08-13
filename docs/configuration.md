@@ -31,7 +31,9 @@ proxies:
 Top-level fields:
 
 - `listen`: optional local SOCKS5 listen address. Defaults to
-  `127.0.0.1:10865`.
+  `127.0.0.1:10865`. Keep it on a loopback address: the adapter supports
+  SOCKS5 no-auth only, so a non-loopback bind exposes an unauthenticated proxy
+  and is not a supported multi-user deployment.
 - `log`: optional runtime logging settings. Defaults to `level: info`,
   `output: logs/app.log`, and `format: text`.
 - `proxies`: map of display names to lists of `x365://` node URLs.

@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+// Node is a validated X365 endpoint. Its exported fields contain private
+// account and provider material and are not safe for public diagnostics.
 type Node struct {
 	Name      string
 	UUID      string
@@ -22,6 +24,7 @@ type Node struct {
 	realityFingerprint string
 }
 
+// ParseNode validates an x365 URI and returns its normalized endpoint fields.
 func ParseNode(name, rawURI string) (Node, error) {
 	u, err := url.Parse(rawURI)
 	if err != nil {
@@ -68,6 +71,7 @@ func ParseNode(name, rawURI string) (Node, error) {
 	}, nil
 }
 
+// UserID decodes the node's UUID into X365 request material.
 func (n Node) UserID() (UserID, error) {
 	userID, err := ParseUserID(n.UUID)
 	if err != nil {
@@ -76,10 +80,12 @@ func (n Node) UserID() (UserID, error) {
 	return userID, nil
 }
 
+// Label returns the node name and endpoint summary for private UI or log output.
 func (n Node) Label() string {
 	return fmt.Sprintf("%s %s", n.Name, n.ServerSummary())
 }
 
+// ServerSummary returns provider endpoint fields for private UI display.
 func (n Node) ServerSummary() string {
 	return fmt.Sprintf("%s:%d path=%s host=%s sni=%s", n.Server, n.Port, n.Path, n.Host, n.SNI)
 }

@@ -11,15 +11,16 @@ import (
 // errOpenTimeout reports that the X365 open handshake exceeded its deadline.
 var errOpenTimeout = errors.New("x365 open handshake timed out")
 
-// handshakeWithDeadline bounds the blocking steps that turn a fresh xhttp
-// stream into a usable X365 connection: the REALITY handshake, the HTTP/2
-// response headers, the X365 request write, and the X365 response read.
+// handshakeWithDeadline bounds the blocking steps performed by handshake while
+// it turns a fresh xhttp stream into an X365 connection. The TCP handshake reads
+// the HTTP/X365 response here; the UDP handshake intentionally defers that read
+// until the target relay starts.
 //
 // Only the TCP dial is bounded otherwise. net/http2 has no response-header
-// timeout, so a server that completes TCP and TLS but never answers leaves the
-// caller blocked in readX365OKResponse with no deadline. For TCP that pins the
-// SOCKS handler, its client conn, a goroutine, and the stream until the whole
-// service stops, which is a realistic outcome on a blackholed or throttled path.
+// timeout, so a server that completes TCP and TLS but never answers can leave a
+// TCP caller blocked in readX365OKResponse with no deadline. That pins the SOCKS
+// handler, its client conn, a goroutine, and the stream until the whole service
+// stops, which is a realistic outcome on a blackholed or throttled path.
 //
 // The deadline closes the stream, which cancels the request context and the
 // request pipe; that unblocks a pending write, response wait, or body read

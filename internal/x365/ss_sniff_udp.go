@@ -157,6 +157,11 @@ func parseShadowsocks2022UDPPlaintext(plain []byte, now time.Time) (string, bool
 	return target, ok
 }
 
+// freshShadowsocks2022UDPEpoch applies the protocol's 2-minute clock skew window
+// to a decrypted header timestamp. Here it is a plausibility check rather than
+// replay protection: this code only labels a target for display, so the window
+// exists to reject a header that decrypted to garbage that happens to parse. A
+// zero timestamp is accepted because some clients leave the field unset.
 func freshShadowsocks2022UDPEpoch(epochValue uint64, now time.Time) bool {
 	const maxInt64AsUint64 = uint64(1<<63 - 1)
 

@@ -1,3 +1,6 @@
+// Package app dispatches the command line and wires process dependencies. With
+// no arguments it launches the TUI; the config-reference subcommand regenerates
+// the committed config template.
 package app
 
 import (
@@ -14,6 +17,7 @@ import (
 
 const appShort = "Local SOCKS5 adapter for decrypted efanapp x365 nodes"
 
+// Run dispatches the TUI and maintenance subcommands for args.
 func Run(args []string) error {
 	return runArgs(args, runTUI, os.Stdout)
 }

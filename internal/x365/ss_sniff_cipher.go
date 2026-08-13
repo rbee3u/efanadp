@@ -62,6 +62,11 @@ func shadowsocks2022KeyCandidateFor(password string, keySize int) (shadowsocks20
 	}, true
 }
 
+// shadowsocks2022UserKey splits a 2022 password into the user PSK and the length
+// of the extensible identity headers that precede the payload. A multi-user
+// server's password is written as identity PSKs joined to the user PSK by colons,
+// with the user PSK last; each leading PSK contributes one 16-byte EIH block that
+// the sniffer has to skip to find the header.
 func shadowsocks2022UserKey(password string, keySize int) ([]byte, int, bool) {
 	parts := strings.Split(password, ":")
 	rawKey := password
@@ -120,6 +125,9 @@ func deriveShadowsocksSubkeyFromMasterKey(masterKey []byte, salt []byte, keySize
 	return hkdf.Key(sha1.New, masterKey, salt, "ss-subkey", keySize)
 }
 
+// evpBytesToKey derives the master key for the pre-2022 methods with OpenSSL's
+// chained-MD5 KDF, which is what those Shadowsocks versions specify; the
+// weakness is inherited from the protocol being sniffed, not a choice here.
 func evpBytesToKey(password []byte, keySize int) []byte {
 	var key []byte
 	var previous []byte

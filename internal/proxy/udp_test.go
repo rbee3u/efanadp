@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -913,6 +914,89 @@ func TestUDPAssociationSweepStopsWithContext(t *testing.T) {
 	cancel()
 	receiveWithin(t, done, "idle sweeper shutdown")
 }
+
+// The association socket is shared by every destination, so a send failure that
+// belongs to one datagram must not end the destination that produced it. A
+// maximum-size upstream response does exactly that: the SOCKS header pushes it
+// past the 65507-byte datagram limit and sendto reports EMSGSIZE. Detaching
+// would throw away a working stream and make the next datagram redo the dial and
+// REALITY handshake.
+func TestUDPAssociationKeepsTargetWhenClientWriteFails(t *testing.T) {
+	var logs logRecorder
+	udpConn := &writeFailingUDPPacketConn{
+		local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 39000},
+		err:   &net.OpError{Op: "write", Err: syscall.EMSGSIZE},
+	}
+	cfg := Config{Logger: logs.logger()}
+	assoc := newUDPAssociation(t.Context().Done(), cfg, udpConn, &connectionTracker{stats: &Stats{}})
+	assoc.clientAddr.Store(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53000})
+
+	// Two readable datagrams, then EOF, so the relay returns on its own if it
+	// keeps going past the failed sends.
+	target := &udpTarget{
+		key:            udpTargetKey("example.org", 53),
+		host:           "example.org",
+		port:           53,
+		conn:           &readSequenceStream{payloads: [][]byte{[]byte("one"), []byte("two")}},
+		responseHeader: mustSOCKSUDPHeader(t, "example.org", 53),
+	}
+	assoc.targets[target.key] = target
+
+	assoc.relayFromTarget(target)
+
+	if got := udpConn.attempts.Load(); got != 2 {
+		t.Fatalf("client write attempts=%d, want both datagrams attempted", got)
+	}
+	if assoc.stats.Download() != 0 {
+		t.Fatalf("download bytes=%d, want none counted for failed sends", assoc.stats.Download())
+	}
+	if got := logs.count("reason=" + dropReasonClientWrite); got != 1 {
+		t.Fatalf("client-write warnings=%d (%v), want exactly one", got, logs.all())
+	}
+	// The relay ends on the upstream EOF, not on the send failures, and only then
+	// detaches the destination.
+	if _, ok := assoc.targets[target.key]; ok {
+		t.Fatal("target still cached after the upstream ended")
+	}
+}
+
+// writeFailingUDPPacketConn fails every send with a fixed error and counts the
+// attempts.
+type writeFailingUDPPacketConn struct {
+	local    *net.UDPAddr
+	err      error
+	attempts atomic.Int32
+}
+
+func (c *writeFailingUDPPacketConn) LocalAddr() net.Addr { return c.local }
+
+func (c *writeFailingUDPPacketConn) ReadFromUDP([]byte) (int, *net.UDPAddr, error) {
+	return 0, nil, net.ErrClosed
+}
+
+func (c *writeFailingUDPPacketConn) WriteToUDP([]byte, *net.UDPAddr) (int, error) {
+	c.attempts.Add(1)
+	return 0, c.err
+}
+
+func (c *writeFailingUDPPacketConn) Close() error { return nil }
+
+// readSequenceStream returns each payload as one Read, then EOF.
+type readSequenceStream struct {
+	payloads [][]byte
+}
+
+func (s *readSequenceStream) Read(p []byte) (int, error) {
+	if len(s.payloads) == 0 {
+		return 0, io.EOF
+	}
+	payload := s.payloads[0]
+	s.payloads = s.payloads[1:]
+	return copy(p, payload), nil
+}
+
+func (s *readSequenceStream) Write(p []byte) (int, error) { return len(p), nil }
+func (s *readSequenceStream) Close() error                { return nil }
 
 func mustSOCKSUDPHeader(tb testing.TB, host string, port int) []byte {
 	tb.Helper()

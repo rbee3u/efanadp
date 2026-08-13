@@ -13,6 +13,13 @@ const (
 	multipathControlPort = 1
 )
 
+// X365 request header layout: ASCII "X365", the version byte, the command byte,
+// 16 bytes of user material, the big-endian destination port, and then a typed
+// destination address introduced by 0x01 IPv4, 0x02 domain, or 0x03 IPv6. Those
+// address type values are the X365 ones and differ from SOCKS5, where 0x03 is a
+// domain and 0x04 is IPv6.
+const x365RequestVersion byte = 1
+
 type x365Command byte
 
 const (
@@ -20,8 +27,10 @@ const (
 	x365CommandUDP x365Command = 2
 )
 
+// UserID is the private 16-byte account value carried in X365 requests.
 type UserID [16]byte
 
+// ParseUserID decodes dashed or undashed hexadecimal UUID text.
 func ParseUserID(uuidText string) (UserID, error) {
 	cleaned := strings.ReplaceAll(uuidText, "-", "")
 	raw, err := hex.DecodeString(cleaned)
@@ -50,7 +59,7 @@ func buildX365RequestWithCommand(destHost string, destPort int, userID UserID, c
 		return nil, fmt.Errorf("unsupported X365 command: %d", command)
 	}
 	frame := make([]byte, 0, 64+len(destHost))
-	frame = append(frame, 'X', '3', '6', '5', 1, byte(command))
+	frame = append(frame, 'X', '3', '6', '5', x365RequestVersion, byte(command))
 	frame = append(frame, userID[:]...)
 	frame = binary.BigEndian.AppendUint16(frame, uint16(destPort))
 

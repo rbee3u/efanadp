@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+// ShadowsocksSniffConfig identifies one landing server whose private
+// credentials may be used for display-only inner-target sniffing.
 type ShadowsocksSniffConfig struct {
 	Name     string `yaml:"name"`
 	Server   string `yaml:"server"`
@@ -14,6 +16,8 @@ type ShadowsocksSniffConfig struct {
 	Password string `yaml:"password"`
 }
 
+// NormalizeShadowsocksSniffConfigs validates entries, applies the legacy cipher
+// alias to Method, and returns a normalized copy with Cipher cleared.
 func NormalizeShadowsocksSniffConfigs(configs []ShadowsocksSniffConfig) ([]ShadowsocksSniffConfig, error) {
 	if len(configs) == 0 {
 		return nil, nil

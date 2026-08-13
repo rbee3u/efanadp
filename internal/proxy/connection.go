@@ -10,8 +10,11 @@ import (
 
 var nextConnID atomic.Uint64
 
+// EventType identifies a connection lifecycle transition.
 type EventType int
 
+// Connection lifecycle transitions. EventUnknown is the zero value and is never
+// emitted; it exists so an uninitialized Event is not mistaken for an open.
 const (
 	EventUnknown EventType = iota
 	ConnectionOpened
@@ -19,6 +22,9 @@ const (
 	ConnectionUpdated
 )
 
+// Event is a connection snapshot emitted synchronously by a relay goroutine.
+// Stats points to live atomic counters and can continue changing after an open
+// or update event is delivered.
 type Event struct {
 	ID        uint64
 	Type      EventType
@@ -30,23 +36,30 @@ type Event struct {
 	Stats     *Stats
 }
 
+// Stats holds concurrency-safe byte counters for one connection.
 type Stats struct {
 	upload   atomic.Int64
 	download atomic.Int64
 }
 
+// AddUpload adds n bytes sent toward the target. Non-positive values and a nil
+// receiver are ignored, so relay paths can report short writes unconditionally.
 func (s *Stats) AddUpload(n int64) {
 	if s != nil && n > 0 {
 		s.upload.Add(n)
 	}
 }
 
+// AddDownload adds n bytes received from the target, with the same nil and
+// non-positive handling as AddUpload.
 func (s *Stats) AddDownload(n int64) {
 	if s != nil && n > 0 {
 		s.download.Add(n)
 	}
 }
 
+// Upload returns the bytes sent so far, or 0 for a nil receiver. The counter
+// keeps advancing while a connection is open, so two reads can differ.
 func (s *Stats) Upload() int64 {
 	if s == nil {
 		return 0
@@ -54,6 +67,8 @@ func (s *Stats) Upload() int64 {
 	return s.upload.Load()
 }
 
+// Download returns the bytes received so far, with the same liveness caveat as
+// Upload.
 func (s *Stats) Download() int64 {
 	if s == nil {
 		return 0

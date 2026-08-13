@@ -170,6 +170,7 @@ func (a *udpAssociation) takeTargetForDatagram(
 	}
 
 	opening := &openingTarget{}
+	// The queue is empty, so this always fits.
 	opening.enqueue(payload)
 	a.openingTargets[key] = opening
 	// Start while holding mu so close cannot mark the association closed between
@@ -439,11 +440,22 @@ func (a *udpAssociation) relayFromTarget(target *udpTarget) {
 		target.touch(time.Now())
 		packet := buf[:headerLen+n]
 		if _, err := a.udpConn.WriteToUDP(packet, addr); err != nil {
-			if !a.isContextDone() && !errors.Is(err, net.ErrClosed) {
-				a.cfg.warnf("[udp] write response target=%s err=%v", target.key, err)
+			// Only a finished association socket ends this destination. Any other
+			// send failure belongs to the one datagram that provoked it: the local
+			// socket is shared by every destination, so tearing this one down would
+			// discard a healthy upstream stream, its relay goroutine, and its
+			// REALITY handshake, and make the next datagram pay to reopen all
+			// three. A maximum-size response reaches this reliably, because the
+			// SOCKS header pushes it past the 65507-byte datagram limit and
+			// sendto reports EMSGSIZE.
+			if a.isContextDone() || errors.Is(err, net.ErrClosed) {
+				a.removeTarget(target)
+				return
 			}
-			a.removeTarget(target)
-			return
+			if a.warnDropOnce(dropReasonClientWrite) {
+				a.cfg.warnf("[udp] drop response target=%s reason=%s err=%v", target.key, dropReasonClientWrite, err)
+			}
+			continue
 		}
 		a.stats.AddDownload(int64(n))
 	}

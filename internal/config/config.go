@@ -1,3 +1,10 @@
+// Package config loads the single runtime configuration snapshot used for one
+// process lifetime, accepting either a decrypted proxies map or the committed
+// template plus a locally supplied UUID. It also generates the sanitized
+// config.reference.yaml template.
+//
+// Parsed values carry private account and provider material. Keep them out of
+// diagnostics and error text; see docs/privacy.md.
 package config
 
 import (
@@ -13,6 +20,8 @@ import (
 	"github.com/rbee3u/efanadp/internal/x365"
 )
 
+// Config is one runtime snapshot. Nodes and sniffing entries contain private
+// account or provider material and must not be included in public diagnostics.
 type Config struct {
 	Listen                  string
 	Log                     LogConfig
@@ -20,12 +29,16 @@ type Config struct {
 	ShadowsocksSniffConfigs []x365.ShadowsocksSniffConfig
 }
 
+// LogConfig controls the minimum level, encoding, and output destination.
 type LogConfig struct {
 	Level  string
 	Format string
 	Output string
 }
 
+// Defaults applied to omitted config fields. DefaultListen stays on loopback
+// because the adapter serves SOCKS5 no-auth only; DefaultLogOutput is relative
+// to the working directory.
 const (
 	DefaultListen    = "127.0.0.1:10865"
 	DefaultLogLevel  = "info"
@@ -33,6 +46,7 @@ const (
 	DefaultLogFormat = "text"
 )
 
+// DefaultLogConfig returns the logging policy used for omitted log fields.
 func DefaultLogConfig() LogConfig {
 	return LogConfig{
 		Level:  DefaultLogLevel,
@@ -41,6 +55,9 @@ func DefaultLogConfig() LogConfig {
 	}
 }
 
+// Load reads and validates one runtime configuration file. YAML errors retain
+// their reason and position but omit source excerpts that may contain private
+// node material.
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

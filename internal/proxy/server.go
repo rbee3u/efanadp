@@ -1,3 +1,10 @@
+// Package proxy serves the local SOCKS5 listener and relays accepted requests
+// through an Upstream. It covers CONNECT over a single upstream stream,
+// UDP_ASSOCIATE with per-destination stream caching, local SOCKS UDP envelope
+// handling, and per-connection accounting reported through Config's hooks.
+//
+// The server speaks SOCKS5 no-auth only and assumes a loopback listener; it is
+// not a multi-user deployment.
 package proxy
 
 import (
@@ -16,22 +23,42 @@ import (
 	"github.com/rbee3u/efanadp/internal/x365"
 )
 
+// Upstream opens X365-carried streams for SOCKS destinations. Implementations
+// must honor context cancellation and return streams whose Close unblocks I/O.
 type Upstream interface {
-	OpenTCP(context.Context, string, int) (io.ReadWriteCloser, error)
-	OpenUDP(context.Context, string, int) (io.ReadWriteCloser, error)
+	OpenTCP(ctx context.Context, destHost string, destPort int) (io.ReadWriteCloser, error)
+	// OpenUDP returns a stream carrying one datagram per Read or Write rather
+	// than a byte stream, so the relay must not split or coalesce payloads.
+	OpenUDP(ctx context.Context, destHost string, destPort int) (io.ReadWriteCloser, error)
 }
 
+// Logger receives relay messages from concurrent connection goroutines.
+// Implementations must be concurrency-safe and return promptly.
 type Logger interface {
 	Infof(format string, args ...any)
 	Warnf(format string, args ...any)
 }
 
+// Config supplies the SOCKS server's upstream and optional observability hooks.
+// Logger and OnConnection can be called concurrently and must not block relay
+// goroutines for long-running work.
 type Config struct {
-	Upstream                Upstream
-	HandshakeTimeout        time.Duration
+	// Upstream is required before the first SOCKS request is served.
+	Upstream Upstream
+
+	// HandshakeTimeout bounds the client greeting and request. Non-positive
+	// values disable that deadline.
+	HandshakeTimeout time.Duration
+
+	// ShadowsocksSniffConfigs affects target labels only, never routing.
 	ShadowsocksSniffConfigs []x365.ShadowsocksSniffConfig
-	Logger                  Logger
-	OnConnection            func(Event)
+
+	// Logger is optional; nil disables relay logging.
+	Logger Logger
+
+	// OnConnection optionally receives synchronous lifecycle events. Event.Stats
+	// remains live after delivery and is safe to read concurrently.
+	OnConnection func(Event)
 
 	// UDPTargetIdleTimeout bounds how long an unused UDP destination keeps its
 	// upstream stream cached. Zero selects DefaultUDPTargetIdleTimeout; a
@@ -48,6 +75,9 @@ func (cfg Config) udpTargetIdleTimeout() time.Duration {
 	return cfg.UDPTargetIdleTimeout
 }
 
+// ServeSOCKS listens and blocks until ctx is canceled or the accept loop fails.
+// Cancellation closes the listener and active clients, then waits for their
+// handlers to return.
 func ServeSOCKS(ctx context.Context, listen string, cfg Config) error {
 	var listenConfig net.ListenConfig
 	ln, err := listenConfig.Listen(ctx, "tcp", listen)
