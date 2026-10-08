@@ -48,16 +48,9 @@ func openXHTTPRealityStream(ctx context.Context, node Node, timeout time.Duratio
 	return stream, nil
 }
 
-// streamConns records the TCP connections a per-stream transport dials, so
-// closing the stream deterministically closes the socket underneath it.
-//
-// http2.Transport.CloseIdleConnections cannot do that job here. The h2 stream is
-// forgotten asynchronously, by the goroutine running RoundTrip, so a
-// CloseIdleConnections call issued from Close almost always runs while the
-// connection still looks busy and leaves it parked in the pool. Each stream owns
-// a fresh transport whose IdleConnTimeout is unset, so nothing ever revisits
-// that pool: the connection, its REALITY session, and the h2 read loop would
-// survive for the rest of the process. One proxied connection leaked one socket.
+// streamConns owns every socket dialed for a stream. CloseIdleConnections can
+// miss sockets still busy in RoundTrip, leaving the per-stream transport and
+// its read loop alive.
 type streamConns struct {
 	mu     sync.Mutex
 	conns  []net.Conn
@@ -147,15 +140,14 @@ func roundTripResponseBody(transport http.RoundTripper, req *http.Request) (io.R
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		if _, drainErr := io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorResponseDrain)); drainErr != nil {
-			closeQuietly(resp.Body)
-			return nil, fmt.Errorf("read x365 error response: %w", drainErr)
-		}
-		closeQuietly(resp.Body)
-		return nil, fmt.Errorf("x365 server returned HTTP %d", resp.StatusCode)
+	if resp.StatusCode == http.StatusOK {
+		return resp.Body, nil
 	}
-	return resp.Body, nil
+	defer closeQuietly(resp.Body)
+	if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorResponseDrain)); err != nil {
+		return nil, fmt.Errorf("read x365 error response: %w", err)
+	}
+	return nil, fmt.Errorf("x365 server returned HTTP %d", resp.StatusCode)
 }
 
 type httpStream struct {
@@ -178,14 +170,23 @@ func (hs *httpStream) Write(p []byte) (int, error) {
 }
 
 func (hs *httpStream) Read(p []byte) (int, error) {
-	if err := hs.waitResponse(); err != nil {
+	body, err := hs.waitResponse()
+	if err != nil {
 		return 0, err
 	}
-	body := hs.responseBody()
 	if body == nil {
 		return 0, io.ErrClosedPipe
 	}
-	return body.Read(p)
+	n, err := body.Read(p)
+	// HTTP/2 breaks a closed response body's read pipe with an unexported
+	// sentinel. Translate that exact error here so callers only need the
+	// standard stream contract, retaining the original diagnostic and chain.
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if cause.Error() == "http2: response body closed" {
+			return n, fmt.Errorf("%w: %w", net.ErrClosed, err)
+		}
+	}
+	return n, err
 }
 
 func (hs *httpStream) Close() error {
@@ -202,9 +203,7 @@ func (hs *httpStream) Close() error {
 		if body != nil {
 			closeQuietly(body)
 		}
-		// Cancelling and closing the body lets h2 shut the stream down on its
-		// own terms; closing the socket afterwards is what guarantees the
-		// connection and its read loop actually go away.
+		// Explicit socket closure also releases the HTTP/2 read loop.
 		if hs.closeConns != nil {
 			hs.closeConns()
 		}
@@ -212,12 +211,12 @@ func (hs *httpStream) Close() error {
 	return nil
 }
 
-func (hs *httpStream) waitResponse() error {
+func (hs *httpStream) waitResponse() (io.ReadCloser, error) {
 	<-hs.responseDone
 
 	hs.mu.Lock()
 	defer hs.mu.Unlock()
-	return hs.err
+	return hs.body, hs.err
 }
 
 func (hs *httpStream) setResponse(body io.ReadCloser, err error) {
@@ -233,12 +232,6 @@ func (hs *httpStream) setResponse(body io.ReadCloser, err error) {
 	close(hs.responseDone)
 }
 
-func (hs *httpStream) responseBody() io.ReadCloser {
-	hs.mu.Lock()
-	defer hs.mu.Unlock()
-	return hs.body
-}
-
 func (hs *httpStream) startResponse(
 	transport http.RoundTripper,
 	req *http.Request,
@@ -248,10 +241,10 @@ func (hs *httpStream) startResponse(
 		body, err := roundTripResponseBody(transport, req)
 		if err != nil {
 			err = fmt.Errorf("http2 post: %w", err)
-			closePipeReaderWithError(requestReader, err)
-			hs.setResponse(nil, err)
-			return
+			if requestReader != nil {
+				_ = requestReader.CloseWithError(err)
+			}
 		}
-		hs.setResponse(body, nil)
+		hs.setResponse(body, err)
 	}()
 }

@@ -1,20 +1,25 @@
 package tui
 
-import "strings"
+func (m *Model) View() string {
+	view := renderAppWindow(m.windowWidth(), m.paneWidth(), m.windowHeader(), m.mainView())
+	if m.height > 0 {
+		// Clip the bottom to prevent scrolling the top border off-screen.
+		view = clampHeight(view, m.height)
+	}
+	return view
+}
 
-func (m *Model) runningBody() string {
-	var b strings.Builder
-	activeConnections, total := m.connections.pageItems(m.connections.page)
-	writeConnectionRows(&b, activeConnections, m.connections.now, m.mainContentWidth(), m.connections.page, m.connections.size(), total)
-	return b.String()
+func (m *Model) mainView() string {
+	height := m.mainContentHeight()
+	help := renderHelp(m.helpItems(), m.mainContentWidth())
+	body := m.mainBody()
+	return fillMainContent(body, m.noticeView(), help, height)
 }
 
 func (m *Model) mainBody() string {
 	switch m.state {
 	case stateNodeList:
-		// Clamp to the budgeted height: the bubbles list can render its own
-		// minimum layout that exceeds a small SetSize, which would push the
-		// window past the terminal height and scroll the top border off.
+		// The bubbles list's minimum layout can exceed SetSize on short terminals.
 		return clampHeight(m.nodeList.View(), m.nodeListHeight())
 	case stateRunning:
 		return m.runningBody()
@@ -23,4 +28,9 @@ func (m *Model) mainBody() string {
 	default:
 		return ""
 	}
+}
+
+func (m *Model) runningBody() string {
+	rows, total := m.connections.pageItems()
+	return renderConnectionTable(rows, m.connections.now, m.mainContentWidth(), m.connections.page, m.connections.rowsPerPage(), total)
 }

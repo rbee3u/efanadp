@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -24,19 +25,17 @@ func parseSOCKSUDPDatagram(packet []byte) (socksUDPDatagram, error) {
 	offset := 4
 	switch packet[3] {
 	case socksAddrIPv4:
-		if len(packet) < offset+4+2 {
+		if len(packet) < offset+net.IPv4len+2 {
 			return socksUDPDatagram{}, fmt.Errorf("SOCKS5 UDP IPv4 packet too short: %d", len(packet))
 		}
-		result.Host = net.IP(packet[offset : offset+4]).String()
-		offset += 4
+		result.Host = net.IP(packet[offset : offset+net.IPv4len]).String()
+		offset += net.IPv4len
 	case socksAddrDomain:
 		if len(packet) < offset+1 {
 			return socksUDPDatagram{}, errors.New("SOCKS5 UDP domain length missing")
 		}
 		hostLen := int(packet[offset])
 		offset++
-		// An empty name would otherwise open an upstream stream to no
-		// destination, the same way socksReadRequest rejects it for TCP.
 		if hostLen == 0 {
 			return socksUDPDatagram{}, errors.New("empty SOCKS5 UDP domain")
 		}
@@ -46,18 +45,18 @@ func parseSOCKSUDPDatagram(packet []byte) (socksUDPDatagram, error) {
 		result.Host = string(packet[offset : offset+hostLen])
 		offset += hostLen
 	case socksAddrIPv6:
-		if len(packet) < offset+16+2 {
+		if len(packet) < offset+net.IPv6len+2 {
 			return socksUDPDatagram{}, fmt.Errorf("SOCKS5 UDP IPv6 packet too short: %d", len(packet))
 		}
-		result.Host = net.IP(packet[offset : offset+16]).String()
-		offset += 16
+		result.Host = net.IP(packet[offset : offset+net.IPv6len]).String()
+		offset += net.IPv6len
 	default:
 		return socksUDPDatagram{}, fmt.Errorf("unsupported SOCKS5 UDP address type: %d", packet[3])
 	}
 	if len(packet) < offset+2 {
 		return socksUDPDatagram{}, fmt.Errorf("SOCKS5 UDP port missing: %d", len(packet))
 	}
-	result.Port = int(packet[offset])<<8 | int(packet[offset+1])
+	result.Port = int(binary.BigEndian.Uint16(packet[offset : offset+2]))
 	offset += 2
 	result.Payload = packet[offset:]
 	return result, nil

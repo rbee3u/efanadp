@@ -8,9 +8,6 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-// The fingerprint decides which browser's ClientHello the REALITY transport
-// imitates, so a wrong mapping makes the handshake look like a client the node
-// did not advertise. An unrecognized value falls back to Chrome to match efanapp.
 func TestRealityFingerprintMapsNodeValues(t *testing.T) {
 	tests := []struct {
 		value string
@@ -35,9 +32,6 @@ func TestRealityFingerprintMapsNodeValues(t *testing.T) {
 	}
 }
 
-// The node carries the public key as base64 and the short ID as hex, but the
-// handshake needs raw bytes: the key goes into the X25519 exchange and the short
-// ID is copied into the ClientHello session ID, so both must arrive decoded.
 func TestBuildRealityConfigDecodesKeyMaterial(t *testing.T) {
 	got, err := buildRealityConfig(Node{
 		Host:      "example.net",
@@ -56,10 +50,6 @@ func TestBuildRealityConfigDecodesKeyMaterial(t *testing.T) {
 	}
 }
 
-// The server name becomes the TLS SNI, which is the whole disguise: dialing with
-// the wrong one, or with an empty one, makes the connection stand out from the
-// browser traffic the transport imitates. SNI wins when set, host is the
-// fallback, and a node with neither must fail here rather than dial.
 func TestBuildRealityConfigResolvesServerName(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -98,10 +88,8 @@ func TestBuildRealityConfigResolvesServerName(t *testing.T) {
 	}
 }
 
-// A node reaches the dial having already been validated by ParseNode, so this
-// only has to prove buildRealityConfig re-validates instead of trusting it: the
-// full condition matrix for both validators lives at that parse boundary, in
-// TestParseNodeRejectsInvalidRealityMaterialWithoutLeakingNodeMaterial.
+// The full validation matrix lives in node_test.go; this checks revalidation
+// for programmatically constructed nodes.
 func TestBuildRealityConfigRevalidatesRealityMaterial(t *testing.T) {
 	tests := []struct {
 		name   string

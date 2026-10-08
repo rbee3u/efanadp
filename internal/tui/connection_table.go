@@ -5,12 +5,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rbee3u/efanadp/internal/human"
-
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/rbee3u/efanadp/internal/human"
 )
 
-func writeConnectionRows(b *strings.Builder, rows []connectionItem, now time.Time, width, page, pageSize, total int) {
+func renderConnectionTable(rows []connectionItem, now time.Time, width, page, pageSize, total int) string {
+	var b strings.Builder
 	layout := newConnectionTableLayout(rows, now, width)
 	b.WriteString(renderConnectionTableHeader(layout))
 
@@ -22,29 +23,14 @@ func writeConnectionRows(b *strings.Builder, rows []connectionItem, now time.Tim
 			b.WriteString(renderConnectionRow(conn, now, layout))
 		}
 	}
-	// When there are multiple pages, pad a partial last page up to a full page
-	// so the pagination dots stay pinned to the same row instead of hugging the
-	// last connection and jumping as pages fill up (matching the node list).
+	// Pad partial pages to keep pagination dots on the same row.
 	if pageCount(total, pageSize) >= 2 {
 		for i := len(rows); i < pageSize; i++ {
 			b.WriteString("\n")
 		}
 	}
 	b.WriteString(renderConnectionPageSummary(page, pageSize, total))
-}
-
-func (c connectionItem) uploadBytes() int64 {
-	if c.stats == nil {
-		return 0
-	}
-	return c.stats.Upload()
-}
-
-func (c connectionItem) downloadBytes() int64 {
-	if c.stats == nil {
-		return 0
-	}
-	return c.stats.Download()
+	return b.String()
 }
 
 func formatConnectionAge(now, startedAt time.Time) string {
@@ -54,12 +40,7 @@ func formatConnectionAge(now, startedAt time.Time) string {
 	if startedAt.IsZero() {
 		return "0s"
 	}
-	d := now.Sub(startedAt)
-	d = max(d, 0)
-	return shortHumanDuration(d)
-}
-
-func shortHumanDuration(d time.Duration) string {
+	d := max(now.Sub(startedAt), 0)
 	if d < time.Second {
 		return d.Round(time.Millisecond).String()
 	}
@@ -77,34 +58,28 @@ func shortHumanDuration(d time.Duration) string {
 }
 
 type connectionTableLayout struct {
-	totalWidth int
-	idWidth    int
-	typeWidth  int
-	fromWidth  int
-	toWidth    int
-	ageWidth   int
-	upWidth    int
-	downWidth  int
+	totalWidth  int
+	idWidth     int
+	typeWidth   int
+	sourceWidth int
+	targetWidth int
+	ageWidth    int
+	upWidth     int
+	downWidth   int
 }
 
-// Connection table geometry. ID, Type, Age, Up, and Down are sized to their
-// widest row and then capped, so one long value cannot squeeze Source and
-// Target, which carry the text worth reading. connectionColumnGapTotal is the
-// width of the separators between the seven columns, named once so the width
-// reserved for them and the width of the header rule cannot drift apart.
+// Cap metadata columns to preserve space for Source and Target.
 const (
 	maxConnectionIDWidth     = 9
 	maxConnectionTypeWidth   = 4
 	maxConnectionAgeWidth    = 6
 	maxConnectionByteWidth   = 9
-	maxConnectionFromWidth   = 22
-	maxConnectionToWidth     = 80
+	maxConnectionSourceWidth = 22
+	maxConnectionTargetWidth = 80
 	minConnectionCellWidth   = 10
 	minConnectionPeerWidth   = 20
 	connectionColumnGapTotal = 12
 
-	// fallbackConnectionTableWidth stands in until the terminal reports its size;
-	// minConnectionTableWidth keeps the columns readable on a narrow one.
 	fallbackConnectionTableWidth = 118
 	minConnectionTableWidth      = 58
 )
@@ -127,8 +102,8 @@ func newConnectionTableLayout(rows []connectionItem, now time.Time, width int) c
 		layout.idWidth = max(layout.idWidth, lipgloss.Width(fmt.Sprintf("#%d", conn.id)))
 		layout.typeWidth = max(layout.typeWidth, lipgloss.Width(conn.protocolLabel()))
 		layout.ageWidth = max(layout.ageWidth, lipgloss.Width(formatConnectionAge(now, conn.startedAt)))
-		layout.upWidth = max(layout.upWidth, lipgloss.Width(human.FormatBytes(conn.uploadBytes())))
-		layout.downWidth = max(layout.downWidth, lipgloss.Width(human.FormatBytes(conn.downloadBytes())))
+		layout.upWidth = max(layout.upWidth, lipgloss.Width(human.FormatBytes(conn.stats.Upload())))
+		layout.downWidth = max(layout.downWidth, lipgloss.Width(human.FormatBytes(conn.stats.Download())))
 	}
 
 	layout.idWidth = min(layout.idWidth, maxConnectionIDWidth)
@@ -140,9 +115,9 @@ func newConnectionTableLayout(rows []connectionItem, now time.Time, width int) c
 	fixedWidth := layout.idWidth + layout.typeWidth + layout.ageWidth +
 		layout.upWidth + layout.downWidth + connectionColumnGapTotal
 	peerWidth := max(minConnectionPeerWidth, availableWidth-fixedWidth)
-	layout.fromWidth = min(maxConnectionFromWidth, max(minConnectionCellWidth, peerWidth/3))
-	layout.toWidth = min(maxConnectionToWidth, max(minConnectionCellWidth, peerWidth-layout.fromWidth))
-	layout.totalWidth = fixedWidth + layout.fromWidth + layout.toWidth
+	layout.sourceWidth = min(maxConnectionSourceWidth, max(minConnectionCellWidth, peerWidth/3))
+	layout.targetWidth = min(maxConnectionTargetWidth, max(minConnectionCellWidth, peerWidth-layout.sourceWidth))
+	layout.totalWidth = fixedWidth + layout.sourceWidth + layout.targetWidth
 	return layout
 }
 
@@ -157,8 +132,8 @@ func renderConnectionTableHeader(layout connectionTableLayout) string {
 	columns := []string{
 		tableHeaderStyle.Render(formatConnectionCell("ID", layout.idWidth, false)),
 		tableHeaderStyle.Render(formatConnectionCell("Type", layout.typeWidth, false)),
-		tableHeaderStyle.Render(formatConnectionCell("Source", layout.fromWidth, false)),
-		tableHeaderStyle.Render(formatConnectionCell("Target", layout.toWidth, false)),
+		tableHeaderStyle.Render(formatConnectionCell("Source", layout.sourceWidth, false)),
+		tableHeaderStyle.Render(formatConnectionCell("Target", layout.targetWidth, false)),
 		tableHeaderStyle.Render(formatConnectionCell("Age", layout.ageWidth, true)),
 		tableHeaderStyle.Render(formatConnectionCell("Up", layout.upWidth, true)),
 		tableHeaderStyle.Render(formatConnectionCell("Down", layout.downWidth, true)),
@@ -179,11 +154,11 @@ func renderConnectionRow(conn connectionItem, now time.Time, layout connectionTa
 	columns := []string{
 		connectionIDStyle.Render(formatConnectionCell(fmt.Sprintf("#%d", conn.id), layout.idWidth, false)),
 		connectionTimeStyle.Render(formatConnectionCell(conn.protocolLabel(), layout.typeWidth, false)),
-		connectionSourceStyle.Render(formatConnectionCell(conn.source, layout.fromWidth, false)),
-		renderConnectionTargetCell(conn.target, layout.toWidth),
+		connectionSourceStyle.Render(formatConnectionCell(conn.source, layout.sourceWidth, false)),
+		renderConnectionTargetCell(conn.target, layout.targetWidth),
 		connectionTimeStyle.Render(formatConnectionCell(formatConnectionAge(now, conn.startedAt), layout.ageWidth, true)),
-		trafficUpStyle.Render(formatConnectionCell(human.FormatBytes(conn.uploadBytes()), layout.upWidth, true)),
-		trafficDownStyle.Render(formatConnectionCell(human.FormatBytes(conn.downloadBytes()), layout.downWidth, true)),
+		trafficUpStyle.Render(formatConnectionCell(human.FormatBytes(conn.stats.Upload()), layout.upWidth, true)),
+		trafficDownStyle.Render(formatConnectionCell(human.FormatBytes(conn.stats.Download()), layout.downWidth, true)),
 	}
 	return strings.Join(columns, "  ") + "\n"
 }

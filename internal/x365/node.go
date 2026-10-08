@@ -90,14 +90,8 @@ func (n Node) ServerSummary() string {
 	return fmt.Sprintf("%s:%d path=%s host=%s sni=%s", n.Server, n.Port, n.Path, n.Host, n.SNI)
 }
 
-// normalizeNodePath gives the path a leading slash.
-//
-// url.URL.String inserts the separator itself, so a path without one still
-// produces a correct request URL. The Referer header is built by concatenating
-// host and path, though, and would silently lose the separator, sending
-// "https://example.orgnode" on a transport whose whole purpose is to look like
-// ordinary browser traffic. Normalizing here rather than rejecting keeps a
-// config that works today working.
+// Normalize for Referer concatenation; url.URL inserts the slash for the
+// request URL, but the header does not.
 func normalizeNodePath(path string) string {
 	if path == "" || strings.HasPrefix(path, "/") {
 		return path

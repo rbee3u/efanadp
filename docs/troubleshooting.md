@@ -1,31 +1,11 @@
 # Troubleshooting
 
-Start with [`setup.md`](setup.md) for the normal workflow and
-[`configuration.md`](configuration.md) for config shape. This page focuses on
-symptoms and the smallest safe checks to isolate them.
-
-When sharing a failure, describe the command or visible TUI status and redact
-private config, node URLs, provider domains, and logs. See
-[`privacy.md`](privacy.md) for report-safe examples.
-
-## Quick Triage
-
-| Symptom | First check |
-| --- | --- |
-| Direct curl hangs or shows fake-IP behavior | Use `socks5h://127.0.0.1:10865`. |
-| Browser differs from curl | Disable browser Secure DNS/DoH for the test. |
-| Startup or handshake recurses | Add `PROCESS-NAME,efanadp,DIRECT` before proxy rules. |
-| QUIC or Secure DNS stalls | Scope UDP/443 rejection to adapter-bound traffic. |
-| Config load fails at startup | Fix the file or pass the intended path with `--config`. |
+For normal operation see [setup](setup.md). Before sharing diagnostics, follow
+[privacy](privacy.md).
 
 ## curl Hangs or Uses a Fake IP
 
-Use `socks5h://`, not `socks5://`, when testing the adapter directly:
-
-```bash
-curl --fail --silent --show-error --proxy "socks5h://127.0.0.1:10865" "https://ifconfig.me/ip"
-curl --fail --silent --show-error --proxy "socks5h://127.0.0.1:10865" "https://api.ipify.org"
-```
+Use the [SOCKS smoke test](setup.md#smoke-tests) with `socks5h://`.
 
 `socks5://` resolves the domain locally first. With mihomo fake-ip enabled, that
 can produce a `198.18.0.0/15` address that the remote X365 side cannot map back
@@ -34,51 +14,21 @@ to use `socks5h://`.
 
 ## Browser Differs From curl
 
-If curl shows the proxied IP but a browser shows the real IP, check the
-browser's Secure DNS or DNS-over-HTTPS setting. For Chrome:
-
-```text
-chrome://settings/security
-Use secure DNS -> off
-```
-
-Browser DoH can bypass mihomo's DNS handling. With TUN + fake-ip setups, that
-can make domain rules behave differently between browser traffic and command-line
-tools.
+If curl uses the proxy but a browser does not, temporarily disable browser
+Secure DNS/DoH and compare mihomo's connection/rule matches. Browser DNS can
+bypass mihomo's DNS handling and affect domain matching in TUN + fake-IP setups.
 
 ## UDP/443, QUIC, and Secure DNS Stall
 
-`efanadp` supports SOCKS5 `UDP_ASSOCIATE` for non-443 UDP, but the observed X365
-client does not forward UDP/443 through the X365 UDP path. Scope a UDP/443 rule
-to the same traffic that would otherwise use the adapter:
-
-```yaml
-rules:
-  - PROCESS-NAME,efanadp,DIRECT
-  # Keep this scoped to adapter-bound traffic. A bare UDP/443 REJECT disables
-  # QUIC globally.
-  - AND,((NETWORK,UDP),(DST-PORT,443),(DOMAIN-SUFFIX,example.org)),REJECT
-  - DOMAIN-SUFFIX,example.org,EFAN-X365-LOCAL
-```
-
-Use the same domain, process, or rule-set condition that routes traffic to
-`EFAN-X365-LOCAL`. Keep this rule before the matching proxy rule.
+UDP/443 is dropped because the observed APK avoids the X365 UDP path for QUIC.
+Use the [scoped reject rule](setup.md#mihomo-setup) before the matching adapter
+rule. Rejecting all UDP/443 would affect unrelated traffic.
 
 ## Adapter Traffic Loops Through mihomo
 
-The adapter's own connection to the node server must not be routed back to the
-adapter. Put a process rule before the proxy rule:
-
-```yaml
-rules:
-  - PROCESS-NAME,efanadp,DIRECT
-  - DOMAIN-SUFFIX,example.net,DIRECT
-  - DOMAIN-SUFFIX,example.org,EFAN-X365-LOCAL
-```
-
-Replace `example.net` with the node server domain suffix from your private
-config. If the node server itself is captured by the adapter rule, startup or
-handshake attempts can recurse until they time out.
+Apply the [process and node-server bypass rules](setup.md#mihomo-setup) before
+adapter-bound rules. Match `PROCESS-NAME` to the actual binary filename;
+otherwise the adapter's node connection can recurse until it times out.
 
 ## Config Does Not Load
 
@@ -89,23 +39,14 @@ Common checks:
   `--config`.
 - `proxies_uuid` has been replaced with your local UUID when using the template.
 - Plain decrypted configs still have a top-level `proxies` map.
-- Node URLs include `path`, `host`, `sni`, `pbk`, and `sid`.
-- `sniff.shadowsocks` entries include `server`, `port`, `method`, and
-  `password` when that optional block is present.
+- Node URLs and optional sniffing entries have the required
+  [fields](configuration.md).
 
-`efanadp` loads config once during startup. Fix the file, then start the process
-again.
+Fix the file and restart. See [path selection](configuration.md#runtime-config-changes)
+if the app loads an unexpected config.
 
 ## UDP Expectations
 
-Current policy is intentionally narrow:
-
-- UDP/443 is dropped until a fresh APK finding proves X365 forwards QUIC through
-  UDP.
-- SOCKS5 UDP fragments are dropped; reassembly is not implemented.
-- Non-443 UDP targets are cached per destination inside one `UDP_ASSOCIATE`
-  association.
-
-Do not loosen these rules based on generic proxy behavior alone. Update
-[`x365-protocol.md`](x365-protocol.md) with reverse findings before changing
-protocol policy.
+For queue, target-limit, or response drops, see [logging](logging.md#event-lines).
+See [UDP policy](x365-protocol.md#udp-path) for supported traffic and
+[relay lifecycle](architecture.md#udp-relay) for target caching and expiry.

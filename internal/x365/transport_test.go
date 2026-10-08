@@ -111,16 +111,14 @@ func TestStreamConnsAdoptAfterCloseClosesImmediately(t *testing.T) {
 	}
 }
 
-// TestHTTPStreamCloseReleasesServerConnections is the regression test for the
-// per-stream connection leak: closing a stream must take its TCP connection with
-// it. It runs the real httpStream wiring against a local h2c server, replacing
-// only the REALITY dial with a plain TCP dial.
+// Exercise real httpStream ownership through local h2c, replacing only the
+// REALITY dial with plain TCP.
 func TestHTTPStreamCloseReleasesServerConnections(t *testing.T) {
 	const streams = 8
 
 	server := startEchoH2CServer(t)
 	for i := range streams {
-		stream, conns := server.openStream(t)
+		stream := server.openStream(t)
 		if _, err := stream.Write([]byte("ping")); err != nil {
 			t.Fatalf("stream %d write: %v", i, err)
 		}
@@ -133,7 +131,6 @@ func TestHTTPStreamCloseReleasesServerConnections(t *testing.T) {
 		if err := stream.Close(); err != nil {
 			t.Fatalf("stream %d close: %v", i, err)
 		}
-		_ = conns
 	}
 
 	if err := server.waitForLiveConns(0); err != nil {
@@ -141,12 +138,74 @@ func TestHTTPStreamCloseReleasesServerConnections(t *testing.T) {
 	}
 }
 
+func TestHTTPStreamClosedResponseUsesStandardError(t *testing.T) {
+	server := startEchoH2CServer(t)
+	stream := server.openStream(t)
+	defer closeQuietly(stream)
+	if _, err := stream.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len("ping"))
+	if _, err := io.ReadFull(stream, buf); err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the real HTTP/2 sentinel without also canceling the stream's
+	// context, which can independently unblock Read with context.Canceled.
+	body, err := stream.waitResponse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeQuietly(body)
+	if _, err := stream.Read(buf); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Read after response close=%v, want net.ErrClosed", err)
+	}
+}
+
+func TestHTTPStreamReadPreservesErrorAndBytes(t *testing.T) {
+	closed := errors.New("http2: response body closed")
+	tests := []struct {
+		name   string
+		err    error
+		closed bool
+	}{
+		{name: "closed", err: closed, closed: true},
+		{name: "wrapped closed", err: fmt.Errorf("response read: %w", closed), closed: true},
+		{name: "unrelated failure", err: errors.New("response failed")},
+		{name: "similar diagnostic", err: errors.New("unexpected http2: response body closed while opening")},
+		{name: "eof", err: io.EOF},
+		{name: "no error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := &httpStream{responseDone: make(chan struct{})}
+			stream.setResponse(io.NopCloser(&responseErrorReader{err: tt.err}), nil)
+			buf := make([]byte, 1)
+			n, err := stream.Read(buf)
+			if n != 1 || buf[0] != 'x' {
+				t.Fatalf("Read=(%d, %q), want (1, x)", n, buf)
+			}
+			if errors.Is(err, net.ErrClosed) != tt.closed {
+				t.Fatalf("Read error=%v, closed=%v", err, tt.closed)
+			}
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("Read error=%v, lost original %v", err, tt.err)
+			}
+		})
+	}
+}
+
+type responseErrorReader struct{ err error }
+
+func (r *responseErrorReader) Read(p []byte) (int, error) {
+	return copy(p, "x"), r.err
+}
+
 type echoH2CServer struct {
 	addr string
 	live atomic.Int64
 }
 
-func (s *echoH2CServer) openStream(tb testing.TB) (*httpStream, *streamConns) {
+func (s *echoH2CServer) openStream(tb testing.TB) *httpStream {
 	tb.Helper()
 	pr, pw := io.Pipe()
 	streamCtx, cancel := context.WithCancel(tb.Context())
@@ -176,7 +235,7 @@ func (s *echoH2CServer) openStream(tb testing.TB) (*httpStream, *streamConns) {
 		closeConns:    conns.closeAll,
 	}
 	stream.startResponse(transport, req, pr)
-	return stream, conns
+	return stream
 }
 
 func (s *echoH2CServer) waitForLiveConns(want int64) error {
@@ -244,8 +303,6 @@ func echoH2CHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// trackedServerConn decrements live exactly once, when the server side of the
-// connection is torn down.
 type trackedServerConn struct {
 	net.Conn
 	live      *atomic.Int64

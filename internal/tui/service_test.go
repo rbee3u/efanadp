@@ -1,30 +1,23 @@
 package tui
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/rbee3u/efanadp/internal/config"
-	"github.com/rbee3u/efanadp/internal/proxy"
 	"github.com/rbee3u/efanadp/internal/x365"
 )
 
 func TestStartNodeTransitionsAndStops(t *testing.T) {
 	var logs []string
-	model := newTestModel(Options{
-		Timeout:          time.Second,
-		HandshakeTimeout: time.Second,
-	})
-	model.deps.serveSOCKS = fakeServeSOCKS
-	model.deps.logger = testAppLogger{log: func(_ string, format string, args ...any) {
+	model := newTestModel(Options{})
+	model.options.Logger = testAppLogger{log: func(_ string, format string, args ...any) {
 		logs = append(logs, format)
 	}}
 
-	cmd := model.requestStartNode(testNode(), "")
+	cmd := model.requestStartNode(testNode())
 	if model.state != stateRunning {
 		t.Fatalf("state=%v, want running", model.state)
 	}
@@ -69,74 +62,9 @@ func (l testAppLogger) write(level string, format string, args ...any) {
 	l.log(level, format, args...)
 }
 
-func TestStartNodeLeavesConnectionEventsOpenAfterStop(t *testing.T) {
-	model := newTestModel(Options{
-		Timeout:          time.Second,
-		HandshakeTimeout: time.Second,
-	})
-	model.deps.serveSOCKS = fakeServeSOCKS
-
-	cmd := model.requestStartNode(testNode(), "")
-	events := model.service.connectionEvents
-	model.stopService()
-	done := serviceDoneFromStartCmd(t, cmd)
-	if done.err != nil {
-		t.Fatalf("service returned %v", done.err)
-	}
-
-	// Connection handlers can outlive the listener, so a late push must stay
-	// safe and must still be delivered rather than discarded.
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("connection event queue rejected a late event after stop: %v", r)
-		}
-	}()
-	events.push(proxy.Event{ID: 1, Type: proxy.ConnectionClosed})
-	late := events.take()
-	if len(late) != 1 {
-		t.Fatalf("late events queued=%d, want 1", len(late))
-	}
-}
-
-func TestServerConfigPassesShadowsocksSniffConfigs(t *testing.T) {
-	model := newTestModel(Options{})
-	model.config.loaded.ShadowsocksSniffConfigs = []x365.ShadowsocksSniffConfig{{
-		Name:     "landing",
-		Server:   "203.0.113.10",
-		Port:     39281,
-		Method:   "aes-256-gcm",
-		Password: "<shadowsocks-password>",
-	}}
-
-	userID, err := testNode().UserID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := model.serverConfig(testNode(), userID, newConnectionQueue())
-	if len(cfg.ShadowsocksSniffConfigs) != 1 {
-		t.Fatalf("len(sniff configs)=%d, want 1", len(cfg.ShadowsocksSniffConfigs))
-	}
-	if cfg.ShadowsocksSniffConfigs[0].Name != "landing" {
-		t.Fatalf("sniff config name=%q, want landing", cfg.ShadowsocksSniffConfigs[0].Name)
-	}
-}
-
 func TestLoadNodesRestoresAndStartsRememberedNode(t *testing.T) {
-	settingsPath := filepath.Join(t.TempDir(), "settings.json")
-	runtime := newRuntimeConfig(Options{
-		ConfigPath:       "proxy.yaml",
-		Timeout:          time.Second,
-		HandshakeTimeout: time.Second,
-	})
-	runtime.settingsPath = settingsPath
-	runtime.loaded = config.Config{Listen: "127.0.0.1:0", Nodes: []x365.Node{testNode()}}
-	model := newModel(startupConfig{
-		runtime: runtime,
-		settings: appSettings{
-			ConfigPath: "proxy.yaml",
-			NodeName:   "test-node",
-		},
-	}, modelDeps{serveSOCKS: fakeServeSOCKS})
+	var saved string
+	model := newTestModel(Options{ConfigPath: "proxy.yaml", Listen: "127.0.0.1:0", Nodes: []x365.Node{testNode()}, RememberedNode: "test-node", SaveSelection: func(name string) error { saved = name; return nil }})
 
 	cmd := model.Init()
 	if model.state != stateRunning {
@@ -149,12 +77,8 @@ func TestLoadNodesRestoresAndStartsRememberedNode(t *testing.T) {
 		t.Fatal("expected service command")
 	}
 
-	saved, err := loadSettings(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if saved.ConfigPath != "proxy.yaml" || saved.NodeName != "test-node" {
-		t.Fatalf("saved settings=%+v, want config and node", saved)
+	if saved != "test-node" {
+		t.Fatalf("saved node=%q", saved)
 	}
 
 	model.stopService()
@@ -165,14 +89,10 @@ func TestLoadNodesRestoresAndStartsRememberedNode(t *testing.T) {
 }
 
 func TestSwitchSelectionKeepsCurrentServiceRunning(t *testing.T) {
-	model := newTestModel(Options{
-		Timeout:          time.Second,
-		HandshakeTimeout: time.Second,
-	})
-	model.deps.serveSOCKS = fakeServeSOCKS
+	model := newTestModel(Options{})
 
-	cmd := model.requestStartNode(testNode(), "")
-	updated, _ := model.updateRunning(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	cmd := model.requestStartNode(testNode())
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	switched := requireModel(t, updated)
 
 	if switched.state != stateNodeList {
@@ -199,13 +119,9 @@ func TestSwitchSelectionKeepsCurrentServiceRunning(t *testing.T) {
 }
 
 func TestQuitWaitsForRunningServiceToStop(t *testing.T) {
-	model := newTestModel(Options{
-		Timeout:          time.Second,
-		HandshakeTimeout: time.Second,
-	})
-	model.deps.serveSOCKS = fakeServeSOCKS
+	model := newTestModel(Options{})
 
-	startCmd := model.requestStartNode(testNode(), "")
+	startCmd := model.requestStartNode(testNode())
 	updated, quitCmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	model = requireModel(t, updated)
 	if quitCmd != nil {
@@ -227,24 +143,16 @@ func TestQuitWaitsForRunningServiceToStop(t *testing.T) {
 	requireQuitCommand(t, quitCmd)
 }
 
-// The first quit asks the service to stop and waits for it. A second one is the
-// user saying that is taking too long, and must be able to leave: without it a
-// wedged teardown leaves a TUI that cannot be closed and a port still bound.
 func TestSecondQuitRequestForcesQuit(t *testing.T) {
-	model := newTestModel(Options{
-		Timeout:          time.Second,
-		HandshakeTimeout: time.Second,
-	})
-	model.deps.serveSOCKS = fakeServeSOCKS
+	model := newTestModel(Options{})
 
-	startCmd := model.requestStartNode(testNode(), "")
+	startCmd := model.requestStartNode(testNode())
 	updated, quitCmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	model = requireModel(t, updated)
 	if quitCmd != nil {
 		t.Fatal("first quit returned a command before the service stopped")
 	}
 
-	// The service has not reported back, so the second request must not wait.
 	_, quitCmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	requireQuitCommand(t, quitCmd)
 
@@ -254,16 +162,12 @@ func TestSecondQuitRequestForcesQuit(t *testing.T) {
 }
 
 func TestQuitDiscardsPendingNodeSwitch(t *testing.T) {
-	model := newTestModel(Options{
-		Timeout:          time.Second,
-		HandshakeTimeout: time.Second,
-	})
-	model.deps.serveSOCKS = fakeServeSOCKS
+	model := newTestModel(Options{})
 
-	startCmd := model.requestStartNode(testNode(), "")
+	startCmd := model.requestStartNode(testNode())
 	nextNode := testNode()
 	nextNode.Name = "next-node"
-	model.requestStartNode(nextNode, "")
+	model.requestStartNode(nextNode)
 	if model.pendingStart == nil {
 		t.Fatal("expected pending node switch")
 	}
@@ -292,7 +196,7 @@ func TestRunningConfigKeysDoNotChangeState(t *testing.T) {
 	model.service = &runningService{id: 7}
 
 	for _, key := range []rune{'c', 'r'} {
-		updated, cmd := model.updateRunning(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
+		updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
 		model = requireModel(t, updated)
 		if cmd != nil {
 			t.Fatalf("key %q returned command; want nil", key)
@@ -308,7 +212,7 @@ func TestCancelReturnStatusExpires(t *testing.T) {
 	model.state = stateNodeList
 	model.service = &runningService{id: 7}
 
-	updated, _ := model.updateNodes(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	model = requireModel(t, updated)
 	if model.state != stateRunning {
 		t.Fatalf("state=%v, want running", model.state)

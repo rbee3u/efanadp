@@ -6,47 +6,54 @@ import (
 	"strings"
 )
 
+// LogConfig controls the minimum level, encoding, and output destination.
+type LogConfig struct {
+	Level  string
+	Format string
+	Output string
+}
+
+// Defaults applied to omitted logging fields. DefaultLogOutput is relative to
+// the working directory.
+const (
+	DefaultLogLevel  = "info"
+	DefaultLogOutput = "logs/app.log"
+	DefaultLogFormat = "text"
+)
+
+// DefaultLogConfig returns the logging policy used for omitted log fields.
+func DefaultLogConfig() LogConfig {
+	return LogConfig{
+		Level:  DefaultLogLevel,
+		Output: DefaultLogOutput,
+		Format: DefaultLogFormat,
+	}
+}
+
 type rawLogConfig struct {
 	Level  *string `yaml:"level"`
 	Format *string `yaml:"format"`
 	Output *string `yaml:"output"`
 }
 
-func runtimeConfigFromRaw(raw rawConfig) (listen string, log LogConfig, err error) {
-	if raw.LogPath != nil {
-		return "", LogConfig{}, errors.New("log_path is no longer supported; use log.output")
-	}
-
-	logConfig, err := normalizeLogConfig(raw.Log)
-	if err != nil {
-		return "", LogConfig{}, err
-	}
-
-	return defaultListen(raw.Listen), logConfig, nil
-}
-
 func normalizeLogConfig(raw rawLogConfig) (LogConfig, error) {
-	config := DefaultLogConfig()
-
 	level, err := normalizeLogLevel(raw.Level)
 	if err != nil {
 		return LogConfig{}, err
 	}
-	config.Level = level
-
 	output, err := normalizeLogOutput(raw.Output)
 	if err != nil {
 		return LogConfig{}, err
 	}
-	config.Output = output
-
 	format, err := normalizeLogFormat(raw.Format)
 	if err != nil {
 		return LogConfig{}, err
 	}
-	config.Format = format
-
-	return config, nil
+	return LogConfig{
+		Level:  level,
+		Format: format,
+		Output: output,
+	}, nil
 }
 
 func normalizeLogLevel(value *string) (string, error) {

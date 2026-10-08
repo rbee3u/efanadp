@@ -13,17 +13,11 @@ import (
 
 const (
 	referenceIntro = "# efanadp reference configuration.\n" +
-		"# Copy this file to config.yaml before first use. Keep config.yaml private.\n" +
-		"# Replace proxies_uuid with your X365 account UUID; leave proxies_tmpl unchanged\n" +
-		"# unless you regenerate this file from a decrypted private config.\n\n"
+		"# Copy this file to config.yaml and keep it private.\n" +
+		"# Replace proxies_uuid with your X365 account UUID; leave proxies_tmpl unchanged.\n\n"
 
-	referenceSniff = "# sniff enables optional display-only target sniffing when efanadp first\n" +
-		"# connects to a Shadowsocks landing server before the real target. Leave this\n" +
-		"# block commented out unless your route has that first hop.\n" +
-		"#\n" +
-		"# shadowsocks entries are matched by server and port. method is the cipher\n" +
-		"# name used by the landing server, and password is that Shadowsocks password.\n" +
-		"# sniffing affects logs and TUI target labels only; relay behavior is unchanged.\n" +
+	referenceSniff = "# Optional Shadowsocks target labels; forwarding is unchanged.\n" +
+		"# Match the landing server by server/port and supply its method/password.\n" +
 		"# sniff:\n" +
 		"#   shadowsocks:\n" +
 		"#     - name: landing\n" +
@@ -37,11 +31,6 @@ const (
 	// generated file.
 	referenceTemplateValidationUUID = "00112233-4455-6677-8899-aabbccddeeff"
 )
-
-type referenceData struct {
-	listen         string
-	encodedProxies string
-}
 
 // GenerateReference renders the committed reference template from a private
 // config file's contents. It strips X365 UUID userinfo only: node hosts, paths,
@@ -69,10 +58,7 @@ func GenerateReference(data []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	return renderReference(referenceData{
-		listen:         defaultListen(source.Listen),
-		encodedProxies: encoded,
-	}), nil
+	return renderReference(defaultListen(source.Listen), encoded), nil
 }
 
 func referenceProxyTemplate(source rawConfig) (yaml.MapSlice, error) {
@@ -93,7 +79,7 @@ func proxyTemplate(proxies yaml.MapSlice) (yaml.MapSlice, error) {
 }
 
 func proxyTemplateURLs(value any) ([]string, error) {
-	return collectProxyURLs(value, "x365 URLs", "empty proxy URL list", proxyTemplateURL)
+	return collectProxyURLs(value, ProxyListShape, proxyTemplateURL)
 }
 
 func proxyTemplateFromPacked(encoded string) (yaml.MapSlice, error) {
@@ -113,12 +99,7 @@ func proxyTemplateFromPacked(encoded string) (yaml.MapSlice, error) {
 }
 
 func uuidlessProxyTemplateURLs(value any) ([]string, error) {
-	return collectProxyURLs(
-		value,
-		"x365 URL templates",
-		"empty proxy URL template list",
-		uuidlessProxyTemplateURL,
-	)
+	return collectProxyURLs(value, TemplateListShape, uuidlessProxyTemplateURL)
 }
 
 func uuidlessProxyTemplateURL(raw string) (string, error) {
@@ -153,37 +134,27 @@ func proxyTemplateURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-func renderReference(reference referenceData) []byte {
+func renderReference(listen, encodedProxies string) []byte {
 	logConfig := DefaultLogConfig()
 
 	var b strings.Builder
 	b.WriteString(referenceIntro)
-	b.WriteString("# listen is the local SOCKS5 TCP listen address for mihomo or direct tests.\n")
-	b.WriteString("# Change the port only if 10865 is already in use or your mihomo rule points\n")
-	b.WriteString("# at a different local port.\n")
-	fmt.Fprintf(&b, "listen: %s\n", yamlScalar(reference.listen))
+	b.WriteString("# listen is the local SOCKS5 TCP listen address; keep it on loopback (no-auth).\n")
+	fmt.Fprintf(&b, "listen: %s\n", yamlScalar(listen))
 	b.WriteString("\n")
-	b.WriteString("# log controls runtime logging. Use level debug only while troubleshooting.\n")
-	b.WriteString("# output accepts stdout, stderr, or a local file path. File outputs rotate.\n")
-	b.WriteString("# format accepts text for humans or json for structured log collectors.\n")
+	b.WriteString("# log controls runtime logging; see docs/configuration.md for accepted values.\n")
 	b.WriteString("log:\n")
 	fmt.Fprintf(&b, "  level: %s\n", yamlScalar(logConfig.Level))
 	fmt.Fprintf(&b, "  output: %s\n", yamlScalar(logConfig.Output))
 	fmt.Fprintf(&b, "  format: %s\n\n", yamlScalar(logConfig.Format))
 	b.WriteString(referenceSniff)
-	b.WriteString("# proxies_uuid is your X365 account UUID. It is inserted into every URL in\n")
-	b.WriteString("# proxies_tmpl at startup. Replace the placeholder with the UUID from your\n")
-	b.WriteString("# decrypted private config, and do not commit the filled config.yaml.\n")
 	b.WriteString("proxies_uuid: <your-x365-uuid>\n")
 	b.WriteString("\n")
-	b.WriteString("# proxies_tmpl is zlib-compressed, base64-encoded YAML containing x365://\n")
-	b.WriteString("# node URL templates with the UUID userinfo removed as x365://@server...\n")
-	b.WriteString("# Treat it as packaging, not redaction: unpacked templates can still contain\n")
-	b.WriteString("# provider hosts, paths, REALITY public keys, and short IDs. Do not edit this\n")
-	b.WriteString("# block by hand; regenerate config.reference.yaml from a private config when\n")
-	b.WriteString("# the node set changes.\n")
+	b.WriteString("# proxies_tmpl is zlib-compressed, base64-encoded YAML with UUID userinfo removed.\n")
+	b.WriteString("# Hosts, paths, and REALITY material remain: packaging is not redaction.\n")
+	b.WriteString("# Regenerate only for template maintenance; review output using docs/privacy.md.\n")
 	b.WriteString("proxies_tmpl: |\n")
-	for _, line := range wrapBase64Line(reference.encodedProxies, 76) {
+	for _, line := range wrapBase64Line(encodedProxies, 76) {
 		fmt.Fprintf(&b, "  %s\n", line)
 	}
 	return []byte(b.String())

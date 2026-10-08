@@ -1,18 +1,10 @@
 package tui
 
 import (
-	"strings"
-
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Semantic palette: each color carries exactly one meaning.
-//   - accent: brand, hotkeys, focus cursors, section headings, node titles, sniffed inner route
-//   - selected: the highlighted item in the node list only
-//   - success/warning/error: status messages only
-//   - upload/download: traffic columns only
-//   - text/muted/subtle: content hierarchy
 const (
 	paneContentInset    = 2
 	nodeSelectionGutter = 2
@@ -30,47 +22,33 @@ var (
 	colorDataUpload   = lipgloss.AdaptiveColor{Light: "#C2410C", Dark: "#FB923C"}
 	colorDataDownload = lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#38BDF8"}
 
-	valueStyle = lipgloss.NewStyle().
-			Foreground(colorText)
-	mutedStyle = lipgloss.NewStyle().
-			Foreground(colorMuted)
-	subtleStyle = lipgloss.NewStyle().
-			Foreground(colorSubtle)
-	helpStyle = lipgloss.NewStyle().
-			Foreground(colorMuted)
-	helpKeyStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(colorAccent)
-	statusInfoStyle = lipgloss.NewStyle().
-			Foreground(colorMuted)
-	statusSuccessStyle = lipgloss.NewStyle().
-				Foreground(colorSuccess)
-	statusWarningStyle = lipgloss.NewStyle().
-				Foreground(colorWarning)
-	statusErrorStyle = lipgloss.NewStyle().
-				Foreground(colorError)
-	tableHeaderStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(colorMuted)
-	tableRuleStyle = lipgloss.NewStyle().
-			Foreground(colorSubtle)
-	trafficUpStyle = lipgloss.NewStyle().
-			Foreground(colorDataUpload)
-	trafficDownStyle = lipgloss.NewStyle().
-				Foreground(colorDataDownload)
-	connectionIDStyle = lipgloss.NewStyle().
-				Foreground(colorSubtle)
-	connectionSourceStyle = lipgloss.NewStyle().
-				Foreground(colorMuted)
-	connectionTargetStyle = lipgloss.NewStyle().
-				Foreground(colorText)
-	connectionArrowStyle = lipgloss.NewStyle().
-				Foreground(colorSubtle)
-	connectionRouteStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(colorAccent)
-	connectionTimeStyle = lipgloss.NewStyle().
-				Foreground(colorMuted)
+	valueStyle  = lipgloss.NewStyle().Foreground(colorText)
+	mutedStyle  = lipgloss.NewStyle().Foreground(colorMuted)
+	subtleStyle = lipgloss.NewStyle().Foreground(colorSubtle)
+
+	helpStyle    = lipgloss.NewStyle().Foreground(colorMuted)
+	helpKeyStyle = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+
+	statusInfoStyle    = lipgloss.NewStyle().Foreground(colorMuted)
+	statusSuccessStyle = lipgloss.NewStyle().Foreground(colorSuccess)
+	statusWarningStyle = lipgloss.NewStyle().Foreground(colorWarning)
+	statusErrorStyle   = lipgloss.NewStyle().Foreground(colorError)
+
+	tableHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(colorMuted)
+	tableRuleStyle   = lipgloss.NewStyle().Foreground(colorSubtle)
+	trafficUpStyle   = lipgloss.NewStyle().Foreground(colorDataUpload)
+	trafficDownStyle = lipgloss.NewStyle().Foreground(colorDataDownload)
+
+	paginationActiveDotStyle   = lipgloss.NewStyle().Foreground(colorAccent)
+	paginationInactiveDotStyle = lipgloss.NewStyle().Foreground(colorSubtle)
+
+	connectionIDStyle     = lipgloss.NewStyle().Foreground(colorSubtle)
+	connectionSourceStyle = lipgloss.NewStyle().Foreground(colorMuted)
+	connectionTargetStyle = lipgloss.NewStyle().Foreground(colorText)
+	connectionArrowStyle  = lipgloss.NewStyle().Foreground(colorSubtle)
+	connectionRouteStyle  = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+	connectionTimeStyle   = lipgloss.NewStyle().Foreground(colorMuted)
+
 	appWindowStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorSubtle).
@@ -83,14 +61,10 @@ var (
 			Border(lipgloss.NormalBorder()).
 			BorderForeground(colorSubtle).
 			Padding(0, paneContentInset)
-	appBrandStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(colorAccent)
-	nodeTitleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(colorAccent)
-	nodeDetailStyle = lipgloss.NewStyle().
-			Foreground(colorMuted)
+
+	appBrandStyle   = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+	nodeTitleStyle  = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+	nodeDetailStyle = lipgloss.NewStyle().Foreground(colorMuted)
 )
 
 func styledNodeDelegate() list.DefaultDelegate {
@@ -146,12 +120,8 @@ func applyNodeListStyle(l *list.Model) {
 		Foreground(colorMuted).
 		PaddingLeft(nodeSelectionGutter)
 	l.Styles.HelpStyle = helpStyle.PaddingTop(1)
-	l.Styles.ActivePaginationDot = lipgloss.NewStyle().
-		Foreground(colorAccent).
-		SetString("•")
-	l.Styles.InactivePaginationDot = lipgloss.NewStyle().
-		Foreground(colorSubtle).
-		SetString("•")
+	l.Styles.ActivePaginationDot = paginationActiveDotStyle.SetString("•")
+	l.Styles.InactivePaginationDot = paginationInactiveDotStyle.SetString("•")
 	l.Styles.DividerDot = lipgloss.NewStyle().
 		Foreground(colorSubtle).
 		SetString(" • ")
@@ -162,35 +132,6 @@ func applyNodeListStyle(l *list.Model) {
 	l.FilterInput.Cursor.Style = l.Styles.FilterCursor
 	l.Paginator.ActiveDot = l.Styles.ActivePaginationDot.String()
 	l.Paginator.InactiveDot = l.Styles.InactivePaginationDot.String()
-}
-
-var (
-	paginationActiveDotStyle   = lipgloss.NewStyle().Foreground(colorAccent)
-	paginationInactiveDotStyle = lipgloss.NewStyle().Foreground(colorSubtle)
-)
-
-// renderPaginationDots renders one bullet per page, highlighting the active
-// page, matching the node list paginator. It returns an empty string for a
-// single page so callers can hide the row entirely. Each dot is a single
-// bullet: the styles carry no SetString value, so Render does not double it.
-func renderPaginationDots(page, count int) string {
-	if count < 2 {
-		return ""
-	}
-	page = min(max(page, 0), count-1)
-	var b strings.Builder
-	for i := range count {
-		if i == page {
-			b.WriteString(paginationActiveDotStyle.Render("•"))
-			continue
-		}
-		b.WriteString(paginationInactiveDotStyle.Render("•"))
-	}
-	return b.String()
-}
-
-func renderStatus(kind statusKind, status string) string {
-	return statusStyle(kind).Render(status)
 }
 
 func statusStyle(kind statusKind) lipgloss.Style {

@@ -10,9 +10,6 @@ import (
 	"time"
 )
 
-// A server that finishes TCP and TLS but never answers the X365 request used to
-// block the caller forever: net/http2 has no response-header timeout, so the
-// read in readX365OKResponse had no deadline at all.
 func TestHandshakeWithDeadlineClosesStalledStream(t *testing.T) {
 	stream := newBlockingCloseNotifyStream()
 	handshake := func() (io.ReadWriteCloser, error) {
@@ -33,11 +30,6 @@ func TestHandshakeWithDeadlineClosesStalledStream(t *testing.T) {
 	}
 }
 
-// The deadline must not outlive a handshake that succeeded: the returned stream
-// is a live relay connection, so a closer left armed would tear it down mid-relay
-// once the timeout elapsed. Running under synctest advances past the deadline
-// instantly, which is what makes the assertion able to fail at all - a wall-clock
-// wait shorter than the deadline would pass even with the closer still armed.
 func TestHandshakeWithDeadlineKeepsSuccessfulStreamOpen(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const timeout = time.Minute
@@ -62,7 +54,6 @@ func TestHandshakeWithDeadlineKeepsSuccessfulStreamOpen(t *testing.T) {
 	})
 }
 
-// A cancelled parent must report cancellation, not a spurious timeout.
 func TestHandshakeWithDeadlineReportsParentCancellation(t *testing.T) {
 	stream := newBlockingCloseNotifyStream()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -82,14 +73,9 @@ func TestHandshakeWithDeadlineReportsParentCancellation(t *testing.T) {
 	}
 }
 
-// When the deadline lands in the gap between a successful handshake and the
-// closer being stopped, the returned conn wraps a stream that is already being
-// closed. Handing it back would defer the timeout into an opaque relay error on
-// the first Read, so the open must fail as a timeout instead.
 func TestHandshakeWithDeadlineRejectsSuccessAfterDeadline(t *testing.T) {
 	stream := newBlockingCloseNotifyStream()
 	conn, err := handshakeWithDeadline(t.Context(), time.Millisecond, stream, func() (io.ReadWriteCloser, error) {
-		// Return success only after the deadline has certainly fired.
 		<-stream.closed
 		return stream, nil
 	})
@@ -106,7 +92,6 @@ func TestHandshakeWithDeadlineRejectsSuccessAfterParentCancellation(t *testing.T
 	ctx, cancel := context.WithCancel(t.Context())
 	conn, err := handshakeWithDeadline(ctx, time.Minute, stream, func() (io.ReadWriteCloser, error) {
 		cancel()
-		// Return success only after the cancellation closer has started.
 		<-stream.closed
 		return stream, nil
 	})

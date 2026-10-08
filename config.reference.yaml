@@ -1,28 +1,18 @@
 # efanadp reference configuration.
-# Copy this file to config.yaml before first use. Keep config.yaml private.
-# Replace proxies_uuid with your X365 account UUID; leave proxies_tmpl unchanged
-# unless you regenerate this file from a decrypted private config.
+# Copy this file to config.yaml and keep it private.
+# Replace proxies_uuid with your X365 account UUID; leave proxies_tmpl unchanged.
 
-# listen is the local SOCKS5 TCP listen address for mihomo or direct tests.
-# Change the port only if 10865 is already in use or your mihomo rule points
-# at a different local port.
+# listen is the local SOCKS5 TCP listen address; keep it on loopback (no-auth).
 listen: 127.0.0.1:10865
 
-# log controls runtime logging. Use level debug only while troubleshooting.
-# output accepts stdout, stderr, or a local file path. File outputs rotate.
-# format accepts text for humans or json for structured log collectors.
+# log controls runtime logging; see docs/configuration.md for accepted values.
 log:
   level: info
   output: logs/app.log
   format: text
 
-# sniff enables optional display-only target sniffing when efanadp first
-# connects to a Shadowsocks landing server before the real target. Leave this
-# block commented out unless your route has that first hop.
-#
-# shadowsocks entries are matched by server and port. method is the cipher
-# name used by the landing server, and password is that Shadowsocks password.
-# sniffing affects logs and TUI target labels only; relay behavior is unchanged.
+# Optional Shadowsocks target labels; forwarding is unchanged.
+# Match the landing server by server/port and supply its method/password.
 # sniff:
 #   shadowsocks:
 #     - name: landing
@@ -31,17 +21,11 @@ log:
 #       method: aes-256-gcm
 #       password: <shadowsocks-password>
 
-# proxies_uuid is your X365 account UUID. It is inserted into every URL in
-# proxies_tmpl at startup. Replace the placeholder with the UUID from your
-# decrypted private config, and do not commit the filled config.yaml.
 proxies_uuid: <your-x365-uuid>
 
-# proxies_tmpl is zlib-compressed, base64-encoded YAML containing x365://
-# node URL templates with the UUID userinfo removed as x365://@server...
-# Treat it as packaging, not redaction: unpacked templates can still contain
-# provider hosts, paths, REALITY public keys, and short IDs. Do not edit this
-# block by hand; regenerate config.reference.yaml from a private config when
-# the node set changes.
+# proxies_tmpl is zlib-compressed, base64-encoded YAML with UUID userinfo removed.
+# Hosts, paths, and REALITY material remain: packaging is not redaction.
+# Regenerate only for template maintenance; review output using docs/privacy.md.
 proxies_tmpl: |
   eJzEnE1vG0Ucxu/9FJxya+JZ74s3UgTihHopKgfE0S+bXe8m9sazq9CeQEqkkqiESlVDaEJSqFus
   GmoU1EDVxF+m45dvgZwZeQu3p4fH16qHnx7NzG+e/47zbrgzvjwcPX5VEqs3bn70ddl1VldWPqmF

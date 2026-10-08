@@ -1,4 +1,4 @@
-package x365
+package sniff
 
 import (
 	"encoding/binary"
@@ -7,8 +7,6 @@ import (
 // Shadowsocks AEAD stream framing: a salt, then length-prefixed chunks whose
 // 2-byte length and payload each carry their own tag.
 const (
-	shadowsocksAEADTagSize         = 16
-	shadowsocksAEADNonceSize       = 12
 	shadowsocksAEADLengthFieldSize = 2
 	shadowsocksMaxChunkPayload     = 0x3fff
 )
@@ -19,7 +17,6 @@ const (
 	shadowsocks2022HeaderLenOffset   = 9
 	shadowsocks2022FixedHeaderLen    = 11
 	shadowsocks2022MaxVariableHeader = 0xffff
-	shadowsocks2022Context           = "shadowsocks 2022 session subkey"
 )
 
 type shadowsocksSniffState int
@@ -30,62 +27,46 @@ const (
 	sniffFailed
 )
 
-// ShadowsocksTargetSniffer incrementally inspects one client-to-server stream.
+// ShadowsocksTCPSniffer incrementally inspects one client-to-server stream.
 // It reports at most one target and is not safe for concurrent use.
-type ShadowsocksTargetSniffer struct {
-	spec      ssCipherSpec
-	limit     int
-	masterKey []byte
-	candidate shadowsocks2022KeyCandidate
-	buffer    []byte
-	done      bool
+type ShadowsocksTCPSniffer struct {
+	spec   shadowsocksCipherSpec
+	key    []byte // Legacy master key or 2022 user key, used to derive session keys.
+	eihLen int
+	limit  int
+	buffer []byte
+	done   bool
 }
 
-// NewShadowsocksTargetSniffer returns a sniffer for the matching landing server,
+// NewShadowsocksTCPSniffer returns a sniffer for the matching landing server,
 // or nil when no usable entry matches. Observe is safe to call on a nil sniffer.
-func NewShadowsocksTargetSniffer(configs []ShadowsocksSniffConfig, host string, port int) *ShadowsocksTargetSniffer {
-	config, ok := matchingShadowsocksSniffConfig(configs, host, port)
+func NewShadowsocksTCPSniffer(configs []ShadowsocksConfig, host string, port int) *ShadowsocksTCPSniffer {
+	config, ok := matchingShadowsocksConfig(configs, host, port)
 	if !ok {
 		return nil
 	}
-	spec, ok := ssCipherSpecForMethod(config.Method)
+	spec, ok := shadowsocksCipherSpecForMethod(config.Method)
 	if !ok {
 		return nil
 	}
-	sniffer := &ShadowsocksTargetSniffer{
-		spec:  spec,
-		limit: shadowsocksSniffBufferLimitForSpec(config, spec),
-	}
-	if sniffer.limit <= 0 {
-		return nil
-	}
+	sniffer := &ShadowsocksTCPSniffer{spec: spec}
 	if spec.is2022 {
-		candidate, ok := shadowsocks2022KeyCandidateFor(config.Password, spec.keySize)
+		keys, ok := parseShadowsocks2022TCPKeys(config.Password, spec.keySize)
 		if !ok {
 			return nil
 		}
-		sniffer.candidate = candidate
+		sniffer.key = keys.userKey
+		sniffer.eihLen = keys.eihLen
 	} else {
-		sniffer.masterKey = evpBytesToKey([]byte(config.Password), spec.keySize)
+		sniffer.key = evpBytesToKey([]byte(config.Password), spec.keySize)
 	}
+	sniffer.limit = spec.tcpBufferLimit(sniffer.eihLen)
 	return sniffer
-}
-
-func matchingShadowsocksSniffConfig(configs []ShadowsocksSniffConfig, host string, port int) (ShadowsocksSniffConfig, bool) {
-	for _, config := range configs {
-		if config.Port != port {
-			continue
-		}
-		if sameHost(config.Server, host) {
-			return config, true
-		}
-	}
-	return ShadowsocksSniffConfig{}, false
 }
 
 // Observe consumes the next stream bytes and reports the inner target once. A
 // false result does not distinguish incomplete input from terminal mismatch.
-func (s *ShadowsocksTargetSniffer) Observe(p []byte) (string, bool) {
+func (s *ShadowsocksTCPSniffer) Observe(p []byte) (string, bool) {
 	if s == nil || s.done || len(p) == 0 {
 		return "", false
 	}
@@ -95,11 +76,8 @@ func (s *ShadowsocksTargetSniffer) Observe(p []byte) (string, bool) {
 		return "", false
 	}
 	if len(s.buffer) < limit {
-		remaining := limit - len(s.buffer)
-		if len(p) > remaining {
-			p = p[:remaining]
-		}
-		s.buffer = append(s.buffer, p...)
+		n := min(len(p), limit-len(s.buffer))
+		s.buffer = append(s.buffer, p[:n]...)
 	}
 	target, state := s.sniff(s.buffer)
 	switch state {
@@ -116,9 +94,9 @@ func (s *ShadowsocksTargetSniffer) Observe(p []byte) (string, bool) {
 	return "", false
 }
 
-func shadowsocksSniffBufferLimitForSpec(config ShadowsocksSniffConfig, spec ssCipherSpec) int {
+func (spec shadowsocksCipherSpec) tcpBufferLimit(eihLen int) int {
 	if spec.is2022 {
-		return spec.saltSize + shadowsocks2022EIHLen(config.Password) +
+		return spec.saltSize + eihLen +
 			shadowsocks2022FixedHeaderLen + shadowsocksAEADTagSize +
 			shadowsocks2022MaxVariableHeader + shadowsocksAEADTagSize
 	}
@@ -126,30 +104,26 @@ func shadowsocksSniffBufferLimitForSpec(config ShadowsocksSniffConfig, spec ssCi
 		shadowsocksMaxChunkPayload + shadowsocksAEADTagSize
 }
 
-func (s *ShadowsocksTargetSniffer) sniff(data []byte) (string, shadowsocksSniffState) {
+func (s *ShadowsocksTCPSniffer) sniff(data []byte) (string, shadowsocksSniffState) {
 	if s.spec.is2022 {
-		return sniffShadowsocks2022TargetWithKey(s.candidate, s.spec, data)
+		return s.sniff2022(data)
 	}
-	return sniffShadowsocksTargetWithMasterKey(s.spec, s.masterKey, data)
+	return s.sniffAEAD(data)
 }
 
-func sniffShadowsocksTargetWithMasterKey(spec ssCipherSpec, masterKey []byte, data []byte) (string, shadowsocksSniffState) {
-	if len(data) < spec.saltSize+shadowsocksAEADLengthFieldSize+shadowsocksAEADTagSize {
+func (s *ShadowsocksTCPSniffer) sniffAEAD(data []byte) (string, shadowsocksSniffState) {
+	if len(data) < s.spec.saltSize+shadowsocksAEADLengthFieldSize+shadowsocksAEADTagSize {
 		return "", sniffNeedMore
 	}
 
-	salt := data[:spec.saltSize]
-	subkey, err := deriveShadowsocksSubkeyFromMasterKey(masterKey, salt, spec.keySize)
-	if err != nil {
-		return "", sniffFailed
-	}
-	aead, err := spec.newAEAD(subkey)
+	salt := data[:s.spec.saltSize]
+	aead, err := s.spec.sessionAEAD(s.key, salt)
 	if err != nil {
 		return "", sniffFailed
 	}
 
 	var nonce [shadowsocksAEADNonceSize]byte
-	lengthStart := spec.saltSize
+	lengthStart := s.spec.saltSize
 	lengthEnd := lengthStart + shadowsocksAEADLengthFieldSize + shadowsocksAEADTagSize
 	lengthPlaintext, err := aead.Open(nil, nonce[:], data[lengthStart:lengthEnd], nil)
 	if err != nil {
@@ -180,16 +154,15 @@ func sniffShadowsocksTargetWithMasterKey(spec ssCipherSpec, masterKey []byte, da
 	return target, sniffFound
 }
 
-func sniffShadowsocks2022TargetWithKey(candidate shadowsocks2022KeyCandidate, spec ssCipherSpec, data []byte) (string, shadowsocksSniffState) {
-	fixedStart := spec.saltSize + candidate.eihLen
+func (s *ShadowsocksTCPSniffer) sniff2022(data []byte) (string, shadowsocksSniffState) {
+	fixedStart := s.spec.saltSize + s.eihLen
 	fixedEnd := fixedStart + shadowsocks2022FixedHeaderLen + shadowsocksAEADTagSize
 	if len(data) < fixedEnd {
 		return "", sniffNeedMore
 	}
 
-	salt := data[:spec.saltSize]
-	subkey := deriveShadowsocks2022Subkey(candidate.userKey, salt, spec.keySize)
-	aead, err := spec.newAEAD(subkey)
+	salt := data[:s.spec.saltSize]
+	aead, err := s.spec.sessionAEAD(s.key, salt)
 	if err != nil {
 		return "", sniffFailed
 	}

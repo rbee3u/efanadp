@@ -1,10 +1,10 @@
 package x365
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // Multipath frame header layout: one type byte, an 8-byte sequence number, one
@@ -14,7 +14,6 @@ const (
 	frameMaxPayload = 0xffffff
 )
 
-// Multipath frame types, as carried in the first header byte.
 const (
 	frameHello byte = 0
 	frameData  byte = 1
@@ -22,11 +21,11 @@ const (
 	frameACK   byte = 5
 )
 
-type frame struct {
-	Type     byte
-	Seq      uint64
-	Reserved byte
-	Payload  []byte
+type frameHeader struct {
+	Type       byte
+	Seq        uint64
+	Reserved   byte
+	PayloadLen int
 }
 
 func buildFrame(frameType byte, seq uint64, payload []byte) ([]byte, error) {
@@ -40,18 +39,28 @@ func buildFrame(frameType byte, seq uint64, payload []byte) ([]byte, error) {
 	return frame, nil
 }
 
-// writeFrameHeader writes a 13-byte header. Callers bound payloadLen to 24
-// bits, so the high byte written at dst[9] is the reserved zero byte.
+// Callers bound payloadLen to 24 bits, leaving dst[9] as the reserved zero byte.
 func writeFrameHeader(dst []byte, frameType byte, seq uint64, payloadLen uint32) {
 	dst[0] = frameType
 	binary.BigEndian.PutUint64(dst[1:9], seq)
 	binary.BigEndian.PutUint32(dst[9:13], payloadLen)
 }
 
-func parseFrameHeader(buf []byte) (frame, int) {
-	payloadLen := int(buf[10])<<16 | int(buf[11])<<8 | int(buf[12])
-	seq := binary.BigEndian.Uint64(buf[1:9])
-	return frame{Type: buf[0], Seq: seq, Reserved: buf[9]}, payloadLen
+func readFrameHeader(r io.Reader) (frameHeader, error) {
+	var header [frameHeaderSize]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return frameHeader{}, err
+	}
+	return parseFrameHeader(header[:]), nil
+}
+
+func parseFrameHeader(buf []byte) frameHeader {
+	return frameHeader{
+		Type:       buf[0],
+		Seq:        binary.BigEndian.Uint64(buf[1:9]),
+		Reserved:   buf[9],
+		PayloadLen: int(buf[10])<<16 | int(buf[11])<<8 | int(buf[12]),
+	}
 }
 
 func buildMultipathHello(host string, port int, streamID [16]byte) ([]byte, error) {
@@ -74,42 +83,25 @@ func buildMultipathHello(host string, port int, streamID [16]byte) ([]byte, erro
 	return payload, nil
 }
 
-type multipathFramer struct {
-	StreamID [16]byte
-	WriteSeq uint64
-}
-
-func newMultipathFramer() (*multipathFramer, error) {
-	var id [16]byte
-	if _, err := rand.Read(id[:]); err != nil {
-		return nil, err
-	}
-	return &multipathFramer{StreamID: id}, nil
-}
-
-func (f *multipathFramer) openFrame(host string, port int) ([]byte, error) {
-	hello, err := buildMultipathHello(host, port, f.StreamID)
+func buildMultipathOpenFrame(host string, port int, streamID [16]byte) ([]byte, error) {
+	hello, err := buildMultipathHello(host, port, streamID)
 	if err != nil {
 		return nil, err
 	}
 	return buildFrame(frameHello, 0, hello)
 }
 
-func (f *multipathFramer) dataFrameHeader(payloadLen int) ([frameHeaderSize]byte, error) {
+func dataFrameHeader(seq uint64, payloadLen int) ([frameHeaderSize]byte, error) {
 	if payloadLen < 0 || payloadLen > frameMaxPayload {
 		return [frameHeaderSize]byte{}, fmt.Errorf("multipath payload too large: %d", payloadLen)
 	}
 	var header [frameHeaderSize]byte
-	writeFrameHeader(header[:], frameData, f.WriteSeq, uint32(payloadLen))
-	f.WriteSeq += framePayloadLenUint64(payloadLen)
+	writeFrameHeader(header[:], frameData, seq, uint32(payloadLen))
 	return header, nil
 }
 
-// framePayloadLenUint64 widens a payload length for sequence arithmetic. Every
-// caller has already bounded payloadLen to [0, frameMaxPayload], either by an
-// explicit check or because parseFrameHeader builds it from three bytes, so the
-// negative branch is unreachable; it stays because it is what makes the
-// conversion provably safe to gosec's G115 check.
+// Callers bound payloadLen to [0, frameMaxPayload]. The negative guard also
+// makes the conversion provably safe to gosec G115.
 func framePayloadLenUint64(payloadLen int) uint64 {
 	if payloadLen < 0 {
 		return 0
@@ -123,8 +115,8 @@ func ackFrameHeader(seq uint64) [frameHeaderSize]byte {
 	return header
 }
 
-func (f *multipathFramer) closeFrameHeader() [frameHeaderSize]byte {
+func closeFrameHeader(seq uint64) [frameHeaderSize]byte {
 	var header [frameHeaderSize]byte
-	writeFrameHeader(header[:], frameClose, f.WriteSeq, 0)
+	writeFrameHeader(header[:], frameClose, seq, 0)
 	return header
 }

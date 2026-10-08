@@ -3,32 +3,46 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 func TestSOCKS5PipelinedConnect(t *testing.T) {
-	var input bytes.Buffer
-	input.Write([]byte{5, 1, 0})
-	input.Write([]byte{5, 1, 0, 3, 11})
-	input.WriteString("example.com")
-	input.Write([]byte{1, 187})
-
-	var output bytes.Buffer
-	reader := bufio.NewReader(&input)
-	if err := socksHandshake(reader, &output); err != nil {
-		t.Fatal(err)
-	}
-	host, port, err := socksReadConnect(reader, &output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if host != "example.com" || port != 443 {
-		t.Fatalf("got %s:%d, want example.com:443", host, port)
-	}
-	if !bytes.Equal(output.Bytes(), []byte{5, 0}) {
-		t.Fatalf("bad handshake response: %x", output.Bytes())
+	for _, fragmented := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fragmented=%t", fragmented), func(t *testing.T) {
+			input := append([]byte{5, 3, 2, 0, 1, 5, 1, 0, 3, 11}, []byte("example.org")...)
+			input = append(input, 1, 187)
+			payload := []byte("first application bytes")
+			input = append(input, payload...)
+			var source io.Reader = bytes.NewReader(input)
+			if fragmented {
+				source = iotest.OneByteReader(source)
+			}
+			reader := bufio.NewReader(source)
+			var output bytes.Buffer
+			if err := handshakeSOCKS(reader, &output); err != nil {
+				t.Fatal(err)
+			}
+			host, port, err := readSOCKSConnect(reader, &output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if host != "example.org" || port != 443 {
+				t.Fatalf("got %s:%d, want example.org:443", host, port)
+			}
+			if !bytes.Equal(output.Bytes(), []byte{5, 0}) {
+				t.Fatalf("bad handshake response: %x", output.Bytes())
+			}
+			remaining, err := io.ReadAll(reader)
+			if err != nil || !bytes.Equal(remaining, payload) {
+				t.Fatalf("remaining=%q err=%v, want application payload %q", remaining, err, payload)
+			}
+		})
 	}
 }
 
@@ -61,23 +75,38 @@ func TestSOCKS5ConnectAddressTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reader := bufio.NewReader(bytes.NewReader(tt.req))
-			host, port, err := socksReadConnect(reader, bytes.NewBuffer(nil))
+			var output bytes.Buffer
+			reader := bufio.NewReader(iotest.OneByteReader(bytes.NewReader(tt.req)))
+			got, err := readSOCKSRequest(reader, &output)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if host != tt.host || port != tt.port {
-				t.Fatalf("got %s:%d, want %s:%d", host, port, tt.host, tt.port)
+			want := socksRequest{Command: socksCommandConnect, Host: tt.host, Port: tt.port}
+			if got != want {
+				t.Fatalf("request=%+v, want %+v", got, want)
+			}
+			if address := got.address(); address != net.JoinHostPort(tt.host, fmt.Sprint(tt.port)) {
+				t.Fatalf("address=%q for host=%q port=%d", address, tt.host, tt.port)
+			}
+			if output.Len() != 0 {
+				t.Fatalf("parser replied before upstream open: %x", output.Bytes())
+			}
+			for end := range len(tt.req) {
+				t.Run(fmt.Sprintf("truncated_at_%d", end), func(t *testing.T) {
+					var reply bytes.Buffer
+					_, err := readSOCKSRequest(bufio.NewReader(bytes.NewReader(tt.req[:end])), &reply)
+					if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+						t.Fatalf("err=%v, want EOF or unexpected EOF", err)
+					}
+					if reply.Len() != 0 {
+						t.Fatalf("truncated request produced a reply: %x", reply.Bytes())
+					}
+				})
 			}
 		})
 	}
 }
 
-// A rejected request must carry the right SOCKS5 reply code, because that code is
-// what the client reports: mihomo and curl surface "command not supported" (7)
-// and "address type not supported" (8) rather than hanging on a silent close.
-// Only CONNECT and UDP_ASSOCIATE are served, so BIND and anything unrecognized
-// are refused here rather than reaching a handler.
 func TestSOCKS5RequestRejectsBadRequests(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -120,7 +149,7 @@ func TestSOCKS5RequestRejectsBadRequests(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var output bytes.Buffer
-			_, err := socksReadRequest(bufio.NewReader(bytes.NewReader(tt.req)), &output)
+			_, err := readSOCKSRequest(bufio.NewReader(bytes.NewReader(tt.req)), &output)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("err=%v, want containing %q", err, tt.wantErr)
 			}
@@ -131,19 +160,36 @@ func TestSOCKS5RequestRejectsBadRequests(t *testing.T) {
 	}
 }
 
-func TestSOCKS5UnsupportedAuthMethod(t *testing.T) {
-	input := bytes.NewReader([]byte{5, 1, 2})
-	var output bytes.Buffer
-	err := socksHandshake(bufio.NewReader(input), &output)
-	if err == nil || !strings.Contains(err.Error(), "no-auth") {
-		t.Fatalf("expected no-auth error, got %v", err)
+func TestSOCKS5HandshakeRejectsInvalidGreetings(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     []byte
+		wantReply []byte
+		wantErr   error
+	}{
+		{name: "missing greeting", wantErr: io.EOF},
+		{name: "missing method count", input: []byte{5}, wantErr: io.ErrUnexpectedEOF},
+		{name: "wrong version", input: []byte{4, 1, 0}},
+		{name: "no methods", input: []byte{5, 0}, wantReply: []byte{5, 0xff}},
+		{name: "missing methods", input: []byte{5, 1}, wantErr: io.EOF},
+		{name: "truncated methods", input: []byte{5, 2, 0}, wantErr: io.ErrUnexpectedEOF},
+		{name: "unsupported methods", input: []byte{5, 2, 1, 2}, wantReply: []byte{5, 0xff}},
 	}
-	if !bytes.Equal(output.Bytes(), []byte{5, 0xff}) {
-		t.Fatalf("bad response: %x", output.Bytes())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var output bytes.Buffer
+			err := handshakeSOCKS(bufio.NewReader(bytes.NewReader(tt.input)), &output)
+			if err == nil || (tt.wantErr != nil && !errors.Is(err, tt.wantErr)) {
+				t.Fatalf("err=%v, want rejection with cause %v", err, tt.wantErr)
+			}
+			if !bytes.Equal(output.Bytes(), tt.wantReply) {
+				t.Fatalf("reply=%x, want %x", output.Bytes(), tt.wantReply)
+			}
+		})
 	}
 }
 
-func TestParseSOCKS5UDPDatagramAddressTypes(t *testing.T) {
+func TestSOCKS5UDPDatagramWireFormat(t *testing.T) {
 	tests := []struct {
 		name    string
 		packet  []byte
@@ -183,60 +229,29 @@ func TestParseSOCKS5UDPDatagramAddressTypes(t *testing.T) {
 			if got.Frag != 0 || got.Host != tt.host || got.Port != tt.port || !bytes.Equal(got.Payload, tt.payload) {
 				t.Fatalf("got %+v, want host=%s port=%d payload=%x", got, tt.host, tt.port, tt.payload)
 			}
-		})
-	}
-}
-
-// buildSOCKSUDPDatagram encodes its address through appendSOCKSAddress, so this
-// covers that encoder for every address type too. It does not replace
-// TestParseSOCKS5UDPDatagramAddressTypes: a round trip agrees with itself even if
-// both sides encode the wrong wire format, so the literal-bytes test is what
-// anchors the encoding to SOCKS5.
-func TestBuildSOCKS5UDPDatagramRoundTrip(t *testing.T) {
-	tests := []struct {
-		name string
-		host string
-		port int
-	}{
-		{name: "domain", host: "example.com", port: 53},
-		{name: "ipv4", host: "127.0.0.1", port: 5353},
-		{name: "ipv6", host: "2001:db8::1", port: 853},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			packet, err := buildSOCKSUDPDatagram(tt.host, tt.port, []byte{0xaa, 0xbb})
-			if err != nil {
-				t.Fatal(err)
+			packet, err := buildSOCKSUDPDatagram(tt.host, tt.port, tt.payload)
+			if err != nil || !bytes.Equal(packet, tt.packet) {
+				t.Fatalf("encoded packet=%x err=%v, want %x", packet, err, tt.packet)
 			}
-			got, err := parseSOCKSUDPDatagram(packet)
-			if err != nil {
-				t.Fatal(err)
+			headerEnd := len(tt.packet) - len(tt.payload)
+			header, err := buildSOCKSUDPHeader(tt.host, tt.port)
+			if err != nil || !bytes.Equal(header, tt.packet[:headerEnd]) {
+				t.Fatalf("encoded header=%x err=%v, want %x", header, err, tt.packet[:headerEnd])
 			}
-			if got.Host != tt.host || got.Port != tt.port || !bytes.Equal(got.Payload, []byte{0xaa, 0xbb}) {
-				t.Fatalf("bad datagram: %+v", got)
+			// Empty UDP payloads are valid, but every truncated envelope must fail.
+			empty, err := parseSOCKSUDPDatagram(tt.packet[:headerEnd])
+			if err != nil || empty.Host != tt.host || empty.Port != tt.port || len(empty.Payload) != 0 {
+				t.Fatalf("empty datagram=%+v err=%v", empty, err)
+			}
+			for end := range headerEnd {
+				if _, err := parseSOCKSUDPDatagram(tt.packet[:end]); err == nil {
+					t.Fatalf("accepted envelope truncated at byte %d", end)
+				}
 			}
 		})
 	}
 }
 
-func TestBuildSOCKS5UDPHeaderMatchesDatagramEnvelope(t *testing.T) {
-	payload := []byte{0xaa, 0xbb}
-	header, err := buildSOCKSUDPHeader("example.com", 53)
-	if err != nil {
-		t.Fatal(err)
-	}
-	packet, err := buildSOCKSUDPDatagram("example.com", 53, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := append(append([]byte(nil), header...), payload...)
-	if !bytes.Equal(packet, want) {
-		t.Fatalf("packet=%x, want header+payload %x", packet, want)
-	}
-}
-
-// Every SOCKS5 address encoder funnels through appendSOCKSAddress, so rejecting
-// an unencodable address here is what keeps a malformed envelope off the wire.
 func TestAppendSOCKSAddressRejectsInvalidAddress(t *testing.T) {
 	tests := []struct {
 		name string
@@ -252,8 +267,6 @@ func TestAppendSOCKSAddressRejectsInvalidAddress(t *testing.T) {
 			if _, err := appendSOCKSAddress(nil, tt.host, tt.port); err == nil {
 				t.Fatalf("appendSOCKSAddress(%q, %d) succeeded, want error", tt.host, tt.port)
 			}
-			// The datagram builder shares the encoder, so it must reject the same
-			// address rather than emitting a truncated envelope.
 			if _, err := buildSOCKSUDPDatagram(tt.host, tt.port, nil); err == nil {
 				t.Fatalf("buildSOCKSUDPDatagram(%q, %d) succeeded, want error", tt.host, tt.port)
 			}
@@ -353,11 +366,9 @@ func TestSOCKS5UDPDatagramRejectsBadPackets(t *testing.T) {
 	}
 }
 
-// A client asks for a relay with an unspecified address, and the server is what
-// supplies the real one, so the request itself must parse rather than be refused.
 func TestSOCKS5UDPAssociateRequestIsParsed(t *testing.T) {
 	request := []byte{5, socksCommandUDPAssociate, 0, 1, 0, 0, 0, 0, 0, 0}
-	got, err := socksReadRequest(bufio.NewReader(bytes.NewReader(request)), bytes.NewBuffer(nil))
+	got, err := readSOCKSRequest(bufio.NewReader(bytes.NewReader(request)), bytes.NewBuffer(nil))
 	if err != nil {
 		t.Fatal(err)
 	}

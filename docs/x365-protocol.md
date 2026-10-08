@@ -1,39 +1,14 @@
 # X365 Protocol Reference
 
-Related docs: [`setup.md`](setup.md) covers operation,
-[`configuration.md`](configuration.md) covers runtime input,
-[`architecture.md`](architecture.md) maps protocol pieces back to code, and
-[`privacy.md`](privacy.md) covers sanitization rules.
-
-This document is the adapter-side implementation reference distilled from the
-sanitized efanrev findings. It intentionally avoids private node data, REALITY
-keys, captures, and account-specific values.
-
-The current baseline is confirmed across efanapp `1-0-27` and `1-0-28`.
-Update this file only when a fresh APK finding changes protocol bytes, frame
-layouts, request headers, or invariants. Keep operational workarounds in
-[`troubleshooting.md`](troubleshooting.md).
+Adapter-side reference from sanitized efanrev findings, with a baseline confirmed
+across efanapp `1-0-27` and `1-0-28`. Change protocol claims only with fresh APK
+evidence; keep operational workarounds in [troubleshooting](troubleshooting.md).
 
 ## Node URI
 
-Decrypted nodes are `x365://` URIs:
-
-```text
-x365://<uuid>@<server>:<port>?path=<path>&host=<host>&sni=<sni>&pbk=<public-key>&sid=<short-id>[&fp=<fingerprint>]
-```
-
-Fields used by the adapter:
-
-- `uuid`: user material. Strip dashes, hex-decode, and use the resulting 16
-  bytes in X365 request frames.
-- `server` and URI `port`: TCP endpoint for the outer transport.
-- `path`: HTTP/2 POST path for xhttp.
-- `host`: HTTP authority/Host header and default HTTPS request host.
-- `sni`: REALITY TLS server name. The current URI parser requires this field;
-  the lower-level transport falls back to `host` only for programmatic nodes.
-- `pbk`: REALITY X25519 public key, base64url encoded, 32 bytes after decode.
-- `sid`: REALITY short ID, hex encoded, at most 8 bytes.
-- `fp`: optional uTLS fingerprint. The observed/default behavior is Chrome-like.
+See [configuration](configuration.md#node-uri-fields) for URI fields. UUIDs decode
+to 16 request bytes. URI parsing requires `sni`; only programmatic nodes can
+fall back to `host` for the REALITY server name.
 
 ## Outer Transport
 
@@ -85,14 +60,11 @@ The server acknowledges successful setup with:
 "X365" 0x00
 ```
 
-That is 5 bytes total. Any other magic or non-zero status is treated as a bad
-X365 response.
+Any other magic or non-zero status is rejected.
 
 ## TCP Path
 
-The observed app does not send ordinary TCP streams by opening an X365 request
-directly to the final target. It opens a TCP-ish X365 stream to the multipath
-control endpoint, then carries the real TCP target inside multipath frames.
+TCP uses a multipath control stream; the hello frame carries the final target.
 
 Open sequence:
 
@@ -139,9 +111,9 @@ Data frames use type `0x01`. The client-side write sequence starts at `0` and
 advances by the payload length after each data frame. On inbound data frames,
 the adapter ACKs `frame.seq + len(frame.payload)` with a type `0x05` frame.
 
-Close uses type `0x03` with the current write sequence and no payload. The
-current adapter implements the observed minimum needed for stable SOCKS TCP
-relay; retransmit and window behavior remain intentionally minimal.
+Close uses type `0x03` with the current write sequence and no payload. The adapter
+discards inbound ACK, hello, and unknown frames; it implements no multipath
+retransmission or send window.
 
 ## UDP Path
 
@@ -161,20 +133,10 @@ Datagram boundary:
 uint16_be(payload_len) payload
 ```
 
-Write rules:
-
-- Maximum payload length is `0xffff`.
-- The length prefix is two bytes, big endian.
-- The prefix is not part of the returned payload byte count.
-- A failed frame write is terminal for that stream because retrying after a
-  partial length prefix or payload would corrupt every following boundary.
-
-Read rules:
-
-- Read exactly two bytes for the payload length.
-- Read exactly that many payload bytes.
-- The adapter allocates a 65535-byte buffer for SOCKS UDP relay, so a valid X365
-  datagram fits without protocol-level fragmentation.
+Payloads may be empty and are limited to 65535 bytes. Returned byte counts
+exclude the prefix. Reads consume the full datagram, discarding any bytes beyond
+the caller's buffer. Failed frame writes are terminal: retrying a partial prefix
+or payload would corrupt subsequent boundaries.
 
 Current adapter policy:
 
@@ -188,8 +150,6 @@ Current adapter policy:
 ## Local SOCKS Mapping
 
 For TCP `CONNECT`, efanadp maps the SOCKS target to the multipath hello target.
-Local DNS behavior matters: direct tests should use `socks5h://` so the target
-domain reaches the adapter instead of a local fake IP.
 
 For UDP `UDP_ASSOCIATE`, efanadp parses the standard SOCKS5 UDP envelope:
 
@@ -199,18 +159,3 @@ RSV[2] FRAG[1] ATYP[1] DST.ADDR DST.PORT[2] DATA
 
 The adapter strips this local SOCKS envelope before writing the X365 UDP
 datagram payload, and rebuilds the SOCKS envelope around each response payload.
-
-## Regression Checklist
-
-When efanrev analyzes a future APK, efanadp only needs protocol changes if one
-of these invariants changes:
-
-- X365 magic/version/command layout.
-- UUID material offset or size.
-- Address type values or address encoding.
-- Success response shape.
-- `multipath.internal:1` control target.
-- Multipath frame header, frame type values, hello payload, or sequence/ACK
-  behavior.
-- Direct UDP command value or `uint16_be(payload_len) payload` datagram wrapper.
-- REALITY/xhttp handshake inputs or HTTP/2 request shape.

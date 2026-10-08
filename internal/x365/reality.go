@@ -2,6 +2,8 @@ package x365
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hkdf"
@@ -33,12 +35,9 @@ const (
 	realityShortIDMaxLen = 8
 )
 
-// REALITY carries its authentication inside the TLS client hello session id:
-// four version bytes, a four-byte unix timestamp, the configured short id, and
-// then the whole 16-byte auth header sealed in place, which fills all 32 bytes.
-// The session id also has to be copied back over hello.Raw, where it sits after
-// the 4-byte handshake header, the 2 legacy version bytes, the 32 random bytes,
-// and the 1-byte session id length.
+// REALITY seals version[4], Unix time[4], and short ID[8] into a 32-byte TLS
+// session ID. Patch both SessionId and Raw; the raw offset skips the handshake
+// header, legacy version, random, and session-ID length.
 const (
 	realitySessionIDSize      = 32
 	realitySessionIDRawOffset = 4 + 2 + 32 + 1
@@ -224,4 +223,12 @@ func dialReality(ctx context.Context, raw net.Conn, config *realityClientConfig)
 		return nil, errors.New("reality peer was not authenticated")
 	}
 	return uConn, nil
+}
+
+func newAESGCM(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
 }

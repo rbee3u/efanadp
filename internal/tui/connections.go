@@ -8,10 +8,17 @@ import (
 	"github.com/rbee3u/efanadp/internal/proxy"
 )
 
-// connectionPageSize is the fallback page size used until the terminal
-// dimensions are known; syncConnectionPageSize keeps pageSize in step with
-// the space available in the main pane.
+// Fallback until terminal dimensions are available.
 const connectionPageSize = 30
+
+type connectionItem struct {
+	id        uint64
+	protocol  string
+	source    string
+	target    string
+	startedAt time.Time
+	stats     *proxy.Stats
+}
 
 type connectionState struct {
 	active   map[uint64]connectionItem
@@ -21,7 +28,7 @@ type connectionState struct {
 	now      time.Time
 }
 
-func (s *connectionState) size() int {
+func (s *connectionState) rowsPerPage() int {
 	if s.pageSize > 0 {
 		return s.pageSize
 	}
@@ -30,7 +37,7 @@ func (s *connectionState) size() int {
 
 func (s *connectionState) setPageSize(size int) {
 	s.pageSize = size
-	s.page = clampPage(s.page, s.activeCount(), s.size())
+	s.page = clampPage(s.page, len(s.active), s.rowsPerPage())
 }
 
 func (s *connectionState) reset(now time.Time) {
@@ -84,60 +91,34 @@ func (s *connectionState) apply(event proxy.Event) {
 			s.closed++
 		}
 	}
-	s.page = clampPage(s.page, s.activeCount(), s.size())
+	s.page = clampPage(s.page, len(s.active), s.rowsPerPage())
 }
 
-func (s *connectionState) activeItems() []connectionItem {
+func (s *connectionState) pageItems() ([]connectionItem, int) {
+	total := len(s.active)
+	start, end, ok := pageRange(s.page, total, s.rowsPerPage())
+	if !ok {
+		return nil, total
+	}
 	items := make([]connectionItem, 0, len(s.active))
 	for _, conn := range s.active {
 		items = append(items, conn)
 	}
-	sortConnections(items)
-	return items
-}
-
-func (s *connectionState) pageItems(page int) ([]connectionItem, int) {
-	total := len(s.active)
-	start, end, ok := pageRange(page, total, s.size())
-	if !ok {
-		return nil, total
-	}
-	items := s.activeItems()
+	slices.SortFunc(items, compareConnections)
 	return items[start:end], total
 }
 
-func sortConnections(items []connectionItem) {
-	slices.SortFunc(items, compareConnections)
-}
-
 func compareConnections(left, right connectionItem) int {
-	if left.startedAt.Equal(right.startedAt) {
-		return cmp.Compare(right.id, left.id)
+	if order := right.startedAt.Compare(left.startedAt); order != 0 {
+		return order
 	}
-	if left.startedAt.After(right.startedAt) {
-		return -1
-	}
-	return 1
+	return cmp.Compare(right.id, left.id)
 }
 
-func (s *connectionState) activeCount() int {
-	return len(s.active)
+func (s *connectionState) nextPage() {
+	s.page = clampPage(s.page+1, len(s.active), s.rowsPerPage())
 }
 
-func (s *connectionState) nextPage() bool {
-	next := clampPage(s.page+1, s.activeCount(), s.size())
-	if next == s.page {
-		return false
-	}
-	s.page = next
-	return true
-}
-
-func (s *connectionState) previousPage() bool {
-	next := clampPage(s.page-1, s.activeCount(), s.size())
-	if next == s.page {
-		return false
-	}
-	s.page = next
-	return true
+func (s *connectionState) previousPage() {
+	s.page = clampPage(s.page-1, len(s.active), s.rowsPerPage())
 }

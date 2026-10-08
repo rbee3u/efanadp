@@ -1,41 +1,17 @@
 package x365
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"sync"
-	"time"
+
+	"github.com/rbee3u/efanadp/internal/datagram"
 )
 
 const x365UDPMaxPayload = 0xffff
 
-func openX365UDP(
-	ctx context.Context,
-	node Node,
-	userID UserID,
-	timeout time.Duration,
-	destHost string,
-	destPort int,
-) (io.ReadWriteCloser, error) {
-	stream, err := openXHTTPRealityStream(ctx, node, timeout)
-	if err != nil {
-		return nil, fmt.Errorf("open xhttp reality stream: %w", err)
-	}
-	// openUDP writes the request but defers the response read to the first
-	// Read, so the deadline here covers the write; a stalled response is bounded
-	// by the association's idle target sweep instead.
-	conn, err := handshakeWithDeadline(ctx, timeout, stream, func() (io.ReadWriteCloser, error) {
-		return openUDP(stream, userID, destHost, destPort)
-	})
-	if err != nil {
-		return nil, fmt.Errorf("open x365 udp stream: %w", err)
-	}
-	return conn, nil
-}
-
-func openUDP(stream io.ReadWriteCloser, userID UserID, destHost string, destPort int) (io.ReadWriteCloser, error) {
+func openUDP(stream io.ReadWriteCloser, userID UserID, destHost string, destPort int) (datagram.Conn, error) {
 	opened := false
 	defer func() {
 		if !opened {
@@ -43,7 +19,7 @@ func openUDP(stream io.ReadWriteCloser, userID UserID, destHost string, destPort
 		}
 	}()
 
-	req, err := buildX365RequestWithCommand(destHost, destPort, userID, x365CommandUDP)
+	req, err := buildX365Request(destHost, destPort, userID, x365CommandUDP)
 	if err != nil {
 		return nil, fmt.Errorf("build x365 udp request: %w", err)
 	}
@@ -65,9 +41,9 @@ type x365UDPConn struct {
 	closeErr     error
 }
 
-var _ io.ReadWriteCloser = (*x365UDPConn)(nil)
+var _ datagram.Conn = (*x365UDPConn)(nil)
 
-func (c *x365UDPConn) Read(p []byte) (int, error) {
+func (c *x365UDPConn) ReadDatagram(p []byte) (int, error) {
 	c.responseOnce.Do(func() {
 		c.responseErr = readX365OKResponse(c.stream)
 	})
@@ -77,7 +53,7 @@ func (c *x365UDPConn) Read(p []byte) (int, error) {
 	return readX365UDPDatagram(c.stream, p)
 }
 
-func (c *x365UDPConn) Write(p []byte) (int, error) {
+func (c *x365UDPConn) WriteDatagram(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	if c.writeErr != nil {
@@ -103,32 +79,22 @@ func (c *x365UDPConn) Close() error {
 	return c.closeErr
 }
 
-// readX365UDPDatagram reads one length-prefixed datagram. A payload larger than
-// p is truncated to len(p) and its remainder discarded to keep the stream framed,
-// which is silent and unrecoverable: callers must size p for the x365UDPMaxPayload
-// maximum so a valid datagram never loses bytes.
+// readX365UDPDatagram discards any payload beyond len(p) to preserve framing.
+// Callers need x365UDPMaxPayload bytes to avoid silent truncation.
 func readX365UDPDatagram(r io.Reader, p []byte) (int, error) {
 	var header [2]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return 0, err
 	}
-	payloadLen := int(header[0])<<8 | int(header[1])
-	if payloadLen <= len(p) {
-		if _, err := io.ReadFull(r, p[:payloadLen]); err != nil {
-			return 0, err
-		}
-		return payloadLen, nil
+	payloadLen := int(binary.BigEndian.Uint16(header[:]))
+	n := min(payloadLen, len(p))
+	if _, err := io.ReadFull(r, p[:n]); err != nil {
+		return 0, err
 	}
-
-	if len(p) > 0 {
-		if _, err := io.ReadFull(r, p); err != nil {
-			return 0, err
-		}
+	if err := discardFull(r, payloadLen-n); err != nil {
+		return n, err
 	}
-	if err := discardFull(r, payloadLen-len(p)); err != nil {
-		return len(p), err
-	}
-	return len(p), nil
+	return n, nil
 }
 
 func writeX365UDPDatagram(w io.Writer, p []byte) (int, error) {
@@ -136,7 +102,7 @@ func writeX365UDPDatagram(w io.Writer, p []byte) (int, error) {
 	if payloadLen > x365UDPMaxPayload {
 		return 0, fmt.Errorf("X365 UDP payload too large: %d", payloadLen)
 	}
-	header := [2]byte{}
+	var header [2]byte
 	binary.BigEndian.PutUint16(header[:], uint16(payloadLen))
 	if err := writeFull(w, header[:]); err != nil {
 		return 0, err
@@ -145,16 +111,4 @@ func writeX365UDPDatagram(w io.Writer, p []byte) (int, error) {
 		return 0, err
 	}
 	return len(p), nil
-}
-
-func discardFull(r io.Reader, n int) error {
-	var buf [512]byte
-	for n > 0 {
-		chunk := min(n, len(buf))
-		if _, err := io.ReadFull(r, buf[:chunk]); err != nil {
-			return err
-		}
-		n -= chunk
-	}
-	return nil
 }

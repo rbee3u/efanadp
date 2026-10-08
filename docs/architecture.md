@@ -1,266 +1,104 @@
-# Architecture Notes
+# Architecture
 
-This document captures behavior that is easy to lose when only reading the
-README. Keep it synchronized with code changes that affect runtime flow,
-package boundaries, relay behavior, or operational limits.
+[ADR 0001](adr/0001-local-x365-adapter-boundary.md) explains the product and trust
+boundary; [ADR 0002](adr/0002-config-and-session-lifecycle.md) explains session
+replacement and configuration lifetime.
 
 ## Package Responsibilities
 
-- `cmd/efanadp`: process entry point.
-- `internal/app`: command-line dispatch and manual dependency wiring. With no
-  arguments it launches the TUI. The `config-reference` subcommand regenerates
-  the committed config template.
-- `internal/config`: YAML config parsing, template UUID insertion,
-  committed template generation from private config input, runtime fields, and
-  node list construction.
-- `internal/tui`: Bubble Tea model, node list, running view, connection table,
-  persisted settings, logging sink, and service lifecycle.
-- `internal/proxy`: SOCKS5 server, connection events, connection stats,
-  multipath TCP relay, UDP_ASSOCIATE, UDP target caching, and local SOCKS UDP
-  envelopes.
-- `internal/x365`: X365 node parsing, request construction, frame bytes,
-  multipath stream setup, direct UDP stream setup, xhttp + REALITY transport,
-  and Shadowsocks target sniffing.
-- `internal/human`: small formatting helpers shared by UI and maintenance
-  commands.
+| Package | Owns |
+| --- | --- |
+| `cmd/efanadp` | Process entry point |
+| `internal/app` | CLI dispatch, dependency wiring, config loading, settings I/O, log sink |
+| `internal/config` | YAML normalization, typed config errors, node parsing, templates |
+| `internal/tui` | Node selection/switching, connection projection, terminal interaction |
+| `internal/session` | Offline preparation, service cancellation/completion, event delivery |
+| `internal/proxy` | SOCKS5 lifecycle, TCP/UDP relay, target cache, connection accounting |
+| `internal/x365` | Node URI, protocol frames, multipath TCP, direct UDP, xhttp + REALITY |
+| `internal/sniff` | Display-only Shadowsocks target inspection |
+| `internal/datagram` | Message-oriented I/O contract |
+| `internal/human` | Shared display formatting |
 
-## Runtime Flow
+`make lint` enforces production boundaries through depguard: core packages cannot
+import application/UI layers; relay layers cannot import config or session;
+`proxy` cannot import `x365`; `sniff` cannot import relay, carrier, or YAML code.
+Tests may cross those boundaries. The TUI receives node data and events directly.
 
-```text
-cmd/efanadp.main
-  -> app.Run
-  -> app command dispatcher
-  -> tui.Run
-    -> load settings from settings.json in the current working directory
-    -> resolve --config/-c, settings configPath, or config.yaml
-    -> config.Load resolved YAML file
-    -> select node
-    -> x365.Client
-    -> proxy.ServeSOCKS
-      -> accept SOCKS5 clients
-      -> CONNECT through multipath TCP, or UDP_ASSOCIATE through direct X365 UDP
-```
+## Runtime Flow And Ownership
 
-The TUI has two primary states:
+1. `app.Run` resolves and loads one config, validates the log destination, and
+   creates the logger.
+2. The TUI selects a node. `session.Prepare` calls `x365.NewClient` to validate
+   authentication offline before stopping an existing session.
+3. A switch cancels and awaits the old session, then starts the prepared
+   replacement with `proxy.ServeSOCKS`. Session IDs reject stale UI messages.
+4. Normal quit or terminal failure cancels and awaits the service before the
+   logger closes. A second quit skips waiting for a stuck teardown.
 
-- Node list: choose a parsed `x365://` node.
-- Running: show current service metadata and active connection counters.
+The session owns the network task and event queue; the TUI owns connection state
+and display timing. See [`session.Service`](../internal/session/session.go) for
+cancellation and event-consumption contracts. `app` owns logger lifetime and
+[settings persistence](configuration.md#remembered-settings).
 
-When switching nodes, the current service keeps running until the new node is
-confirmed. Config file changes are applied by restarting `efanadp`.
+## I/O And Error Contracts
 
-## Config And Settings
+TCP uses `io.ReadWriteCloser`; UDP uses [`datagram.Conn`](../internal/datagram/conn.go)
+to preserve message boundaries. These interfaces and
+[`proxy.Upstream`](../internal/proxy/server.go) define buffer, closure, and error
+contracts.
 
-`config.Load` decodes YAML config values and parses:
-
-- Plain `proxies` maps from decrypted configs.
-- Committed `proxies_tmpl` + `proxies_uuid` templates from
-  `config.reference.yaml`.
-- Optional runtime fields `listen` and `log`.
-- Optional `sniff.shadowsocks` entries.
-
-The TUI stores only the last successful config path and node name in
-`settings.json` in the current working directory. It does not persist node
-contents. The startup config path priority is explicit CLI path, then settings,
-then `config.yaml`.
+Config failures with startup hints carry `config.Error.Kind`. YAML fields and
+legacy aliases stay in `config`; sniffing receives normalized values.
 
 ## SOCKS5 Server
 
-`proxy.ServeSOCKS` listens on the configured TCP address and handles each client
-connection in its own goroutine. The TUI wires an `x365.Client` into
-`proxy.Config` as the upstream for TCP and UDP streams.
+The server accepts no-auth `CONNECT` and `UDP_ASSOCIATE`, rejects fake-IP
+targets in `198.18.0.0/15`, and applies the [UDP policy](x365-protocol.md#udp-path).
 
-Supported commands:
+Each client has a handler goroutine. Cancellation closes the listener and
+clients, then awaits handlers. Descriptor/buffer exhaustion retries with
+exponential backoff from 5 ms to 1 s; other accept errors stop the service.
 
-- `CONNECT`: relays TCP-like streams through the recovered multipath path.
-- `UDP_ASSOCIATE`: binds a local UDP socket and relays non-443 datagrams through
-  direct X365 UDP streams.
+## TCP Relay
 
-Unsupported behavior:
+A CONNECT uses the [X365 multipath TCP path](x365-protocol.md#tcp-path).
 
-- SOCKS authentication methods other than no-auth.
-- SOCKS5 UDP fragments (`FRAG != 0`).
-- UDP/443, because the observed APK avoids forwarding QUIC through X365 UDP.
-- Local mihomo fake IP targets in `198.18.0.0/15`.
+ACKs must not block reads behind a flow-controlled upload; see
+[`ackQueue`](../internal/x365/multipath_ack.go). Graceful close has a bounded
+wait before closing the stream to release stalled writes.
 
-When a fake IP target is seen, the adapter rejects the request and points direct
-testers toward `socks5h://`, which sends the domain name through SOCKS instead
-of resolving it locally.
+## UDP Relay
 
-The accept loop survives descriptor and buffer exhaustion. Every proxied
-connection holds an upstream socket and every cached UDP destination holds
-another, so a busy client can push the process to its limit while the listener
-stays healthy. Those accept failures are logged and retried with a backoff
-between 5ms and 1s instead of stopping the service; any other accept error still
-ends it.
+A UDP association owns the local socket and per-destination streams for one
+TCP control connection. It accepts only the TCP peer's IP, enforces a declared
+non-zero UDP source port, and otherwise pins the first valid source port.
 
-## TCP Relay Path
+Each target host/port gets one cached direct X365 UDP stream. Background opens
+keep handshakes from blocking other destinations; queued datagrams drain before
+later packets use the stream. See [drop reasons](logging.md#event-lines) for
+queue and target limits.
 
-For SOCKS5 `CONNECT`, the adapter does not open X365 directly to the requested
-target. It:
+Targets idle for 90 seconds expire, checked every 15 seconds; later datagrams
+reopen them. See [logging](logging.md#event-lines) for response-send failures.
 
-1. Opens an xhttp + REALITY stream to the node.
-2. Sends an X365 TCP command to `multipath.internal:1`.
-3. Reads the 5-byte `X365 0x00` success response.
-4. Sends a multipath hello frame with a random stream ID and the real target.
-5. Relays application bytes through multipath data frames.
+## Transport Lifetime
 
-Inbound data frames are ACKed by sequence number plus payload length. Close
-frames terminate reads with `io.EOF`. Retransmit and window behavior are kept to
-the observed minimum needed for stable SOCKS TCP relay.
+Each stream owns an xhttp + REALITY transport and its dialed sockets. Closing
+only idle HTTP/2 connections is insufficient while RoundTrip still considers a
+stream active; explicit socket closure releases its read loop.
 
-ACKs never wait for the frame write lock. A data frame write parks in the
-upstream flow-control window for as long as the destination is slow to drain, and
-it holds that lock while it does, so an ACK issued from the read path would stall
-the download direction and the two directions would wedge against each other.
-An ACK therefore goes out inline when the write path is idle, and is otherwise
-handed to a per-connection sender goroutine. ACKs are cumulative, so the queue
-keeps only the newest sequence.
-
-The graceful multipath close frame is also bounded. An idle write lock does not
-guarantee that the HTTP/2 write itself can progress, so shutdown waits up to 100
-ms for the frame and then closes the underlying stream to release it. A stalled
-peer therefore cannot hold a SOCKS handler or node switch open indefinitely.
-
-## UDP Relay Path
-
-For SOCKS5 `UDP_ASSOCIATE`, the adapter:
-
-1. Creates a local UDP relay socket tied to the TCP association.
-2. Parses SOCKS5 UDP envelopes from the client.
-3. Drops fragments, fake IP targets, and UDP/443.
-4. Requires the UDP source IP to match the TCP control client, honors a non-zero
-   source port declared by the `UDP_ASSOCIATE` request, then pins the association
-   to the first valid source port when the request used port zero. Datagrams from
-   any other source are dropped.
-5. Opens one cached direct X365 UDP stream per target host/port, in the
-   background so a handshake never blocks other destinations, up to 64 live or
-   opening destinations per association.
-6. Sends only the datagram payload through the X365 stream.
-7. Rebuilds SOCKS5 UDP envelopes around response payloads.
-8. Closes cached targets that stay idle past the UDP target idle timeout.
-
-A failed send to the local client drops that response and keeps the destination
-cached, because the association socket is shared by every destination while the
-failure belongs to one datagram; only a finished socket ends the destination. An
-upstream response at the X365 maximum reaches this, since the added SOCKS
-envelope pushes it past the 65507-byte datagram limit.
-
-The direct X365 UDP stream sends command `0x02` to the actual UDP target and
-frames each datagram as `uint16_be(payload_len) payload`. Its X365 response is
-read lazily, on the first read from the target, so a refused destination is
-reported by the target relay rather than by the open call.
-
-A cache hit marks its target active while the association lock is held, so the
-idle sweep cannot close a destination that an in-flight datagram is about to
-reuse. Steady traffic to one resolver makes that the common case.
-
-A cache miss opens the destination in the background rather than on the client
-relay loop, carrying the datagram that triggered it along with any that arrive
-while it is opening. That loop is the association's only reader, so an open
-running on it would delay every other destination behind a TCP dial, a REALITY
-handshake, and the X365 request write, and the kernel receive buffer drops
-datagrams once it fills. A destination the server refuses would repeat it: the
-open itself succeeds because the X365 response is read lazily, the first target
-read then fails and detaches it, and the next datagram opens it again. Only one
-open runs per destination at a time, and datagrams arriving for a destination
-that is still opening queue onto that open rather than being dropped. The queue
-has room for a handful; past that the client is outrunning a destination that
-is not answering yet, and datagrams are dropped with reason `target-not-ready`
-instead of spending memory to deliver a burst the client has already given up
-on.
-
-The association also caps the combined number of open and opening destinations
-at 64. Without that bound, a burst of unique destinations starts one TCP dial
-and REALITY handshake per datagram before any of them can finish, then retains a
-stream, relay goroutine, and read buffer for each successful open. Further new
-destinations are dropped with reason `target-limit`; traffic to destinations
-already counted by the association continues normally.
-
-Client pinning follows RFC 1928: a `UDP_ASSOCIATE` relay belongs to the client
-that created it. The TCP peer IP is authoritative, and a non-zero port in the
-request narrows the accepted endpoint further; the usual unspecified port is
-pinned by the first valid datagram. Without those checks, another process or a
-remote host could claim the relay first and receive its inbound responses.
-
-Cached targets expire because each one owns an xhttp + REALITY stream, a relay
-goroutine, and a read buffer, while an association only ends when its client
-closes the TCP control connection. Expiry keeps a long-lived association that
-talks to many destinations from holding every stream for its whole lifetime; a
-later datagram for an expired destination just reopens it.
-
-## Transport
-
-Every X365 stream is carried over xhttp + REALITY:
-
-- TCP dial goes to the node server and port.
-- REALITY uses uTLS and patches the ClientHello session ID.
-- HTTP/2 sends a `POST` to `https://<host><path>`.
-- `Content-Type`, `User-Agent`, `Referer`, and `Host` mirror the observed client
-  shape described in `x365-protocol.md`.
-
-The HTTP response must be `200 OK`; after that, the request body and response
-body are treated as a bidirectional byte stream.
-
-TCP stream opening is deadline-bounded as a whole, not just at the TCP dial.
-`net/http2` has no response-header timeout, so a node that completes TCP and
-REALITY but never answers the X365 request would otherwise block the caller with
-no deadline, pinning a SOCKS handler, its client connection, a goroutine, and the
-stream until the service stops. The TCP open deadline covers the REALITY
-handshake, response headers, X365 request write, and X365 response read; on
-expiry it closes the stream, which unblocks whichever step was waiting. A
-stream that opens successfully is never closed by this deadline, and caller
-cancellation is still reported as cancellation.
-
-UDP opening uses the same deadline while establishing the outer transport and
-writing the X365 request, but deliberately returns before reading the HTTP/X365
-response. The target relay consumes that response on its first read; if it
-never arrives, the UDP target idle sweep closes the stream. This preserves the
-lazy UDP behavior described above without leaving the target cached forever.
+The opening deadline covers outer transport setup and the X365 request write.
+TCP also waits for the HTTP/X365 response; UDP defers it to the target reader,
+where idle expiry bounds an unanswered stream. Successful opening disarms the
+deadline, while caller cancellation still ends the transport.
 
 ## Observability
 
-The `proxy` package emits `Event` values for open, update, and close.
-The TUI consumes these events to render active/closed counts and connection
-rows. Logs use the same `source` and `target` terms as the table.
+Connection events feed the TUI and use the same `source` and `target` terms as
+[logs](logging.md). The session queue preserves opens/closes and coalesces
+pending label updates by connection ID. It does not wait for the UI; the TUI
+applies each batch before rendering. Undrained lifecycle events can grow with
+connection churn; there is no fixed queue limit.
 
-Events cross into the TUI through a queue rather than a bounded channel, and the
-update loop applies a whole backlog per render. Producers run on connection
-goroutines and must never block on the UI, so a bounded channel would have to
-discard, and a discarded close event is unrecoverable: nothing else tells the
-model a connection ended, so its row would stay active and the closed counter
-would under-count until the next node switch. Opens and closes are therefore
-always queued, while a pending update for the same connection is replaced in
-place, since an update only carries that connection's newest target label. Queue
-growth is bounded by live connections plus the churn between two renders.
-
-Optional Shadowsocks sniffing can update a target from:
-
-```text
-landing-host:port
-```
-
-to:
-
-```text
-landing-host:port->inner-host:port
-```
-
-This is display-only. Relay behavior continues even when sniffing is absent or
-fails.
-
-## Maintenance Notes
-
-- Keep protocol byte layouts in `x365-protocol.md`.
-- Keep private-material and sanitization guidance in `privacy.md`.
-- Keep config shape and template behavior in `configuration.md`.
-- Keep user-facing operation and TUI notes in `setup.md`.
-- Keep log output behavior and event examples in `logging.md`.
-- Keep fake-IP, DNS, loop, QUIC, and UDP/443 symptoms in `troubleshooting.md`.
-- Prefer tests with injected dialers/callbacks over live network tests.
-- Use the `manual` build tag only for private, opt-in probes.
-- Keep docs and tests sanitized; do not derive examples from private configs,
-  node URLs, provider domains, captures, or live logs.
-- Revisit UDP/443, fragment handling, and multipath retransmit/window behavior
-  only with fresh reverse findings or focused tests. Do not change these
-  policies based on generic proxy behavior alone.
+Sniffed targets affect labels only; forwarding does not depend on sniffing
+success. [Logging](logging.md#event-lines) defines UDP observation limits.

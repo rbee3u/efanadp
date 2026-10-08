@@ -6,26 +6,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-func (m *Model) View() string {
-	view := renderAppWindow(m.windowWidth(), m.paneWidth(), m.windowHeader(), m.mainView())
-	if m.height > 0 {
-		// Final guard: never emit more lines than the terminal has, otherwise
-		// it scrolls and the top border is lost. Clipping the bottom instead
-		// keeps the frame anchored on pathologically short terminals.
-		view = clampHeight(view, m.height)
-	}
-	return view
-}
-
-func (m *Model) mainView() string {
-	height := m.mainContentHeight()
-	help := renderHelp(m.helpItems(), m.mainContentWidth())
-	body := m.mainBody()
-	return fillMainContent(body, m.noticeView(), help, height)
-}
-
-// fillMainContent pins the body to the top and the notice/help rail to the
-// bottom, so both main screens keep the same vertical rhythm.
 func fillMainContent(body, notices, help string, height int) string {
 	body = strings.TrimRight(body, "\n")
 	tail := help
@@ -39,8 +19,6 @@ func fillMainContent(body, notices, help string, height int) string {
 	return body + strings.Repeat("\n", gap) + tail
 }
 
-// clampHeight trims a block to at most `height` lines so a component can never
-// make the main pane taller than its budget.
 func clampHeight(s string, height int) string {
 	if height < 1 {
 		height = 1
@@ -52,9 +30,8 @@ func clampHeight(s string, height int) string {
 	return strings.Join(lines[:height], "\n")
 }
 
-// lipgloss Style.Width includes padding but excludes borders, so only the
-// border size is subtracted here; subtracting the full frame would shrink the
-// text area below mainContentWidth and wrap full-width rows.
+// Style.Width includes padding but excludes borders; subtracting the full frame
+// would shrink and wrap content.
 func renderAppWindow(width, paneWidth int, header, main string) string {
 	headerPane := headerPaneStyle.Width(max(1, paneWidth-headerPaneStyle.GetHorizontalBorderSize())).Render(header)
 	mainPane := mainPaneStyle.Width(max(1, paneWidth-mainPaneStyle.GetHorizontalBorderSize())).Render(main)
@@ -79,9 +56,7 @@ func (m *Model) syncConnectionPageSize() {
 // status messages so the connection table never moves when one appears.
 const runningNoticeReserve = 2
 
-// connectionRowsPerPage sizes a connection page to the space left in the main
-// pane: table header (2 lines), page summary (1), one gap line, the reserved
-// notice zone, and the help footer.
+// Reserve four lines for the table header, page summary, and gap.
 func (m *Model) connectionRowsPerPage() int {
 	height := m.mainContentHeight()
 	helpHeight := lipgloss.Height(renderHelp(runningHelp(), m.mainContentWidth()))

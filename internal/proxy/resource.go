@@ -7,17 +7,10 @@ import (
 	"time"
 )
 
-func closeWhenContextDone(ctx context.Context, closer io.Closer) func() {
-	return runWhenContextDone(ctx, func() {
+func closeWhenContextDone(ctx context.Context, closer io.Closer) func() bool {
+	return context.AfterFunc(ctx, func() {
 		closeQuietly(closer)
 	})
-}
-
-func runWhenContextDone(ctx context.Context, fn func()) func() {
-	stop := context.AfterFunc(ctx, fn)
-	return func() {
-		_ = stop()
-	}
 }
 
 func closeQuietly(closer io.Closer) {
@@ -27,13 +20,23 @@ func closeQuietly(closer io.Closer) {
 	_ = closer.Close()
 }
 
+func writeFull(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
+	}
+	return nil
+}
+
 func setDeadlineQuietly(conn net.Conn, deadline time.Time) {
 	if conn == nil {
 		return
 	}
 	_ = conn.SetDeadline(deadline)
-}
-
-func writeSOCKSReplyQuietly(writer io.Writer, code byte) {
-	_ = writeSOCKSReply(writer, code)
 }

@@ -6,9 +6,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// helpItem is one footer help entry. keys is the hotkey group rendered in the
-// accent key style; label is the plain description. Either side may be empty:
-// a keys-only item renders as a hotkey, a label-only item as a plain hint.
 type helpItem struct {
 	keys  string
 	label string
@@ -115,4 +112,39 @@ func (m *Model) nodeHelp() []helpItem {
 		items = append(items, helpItem{keys: "esc", label: "cancel"})
 	}
 	return append(items, helpItem{keys: "q", label: "quit"})
+}
+
+func renderGuidance(text string) string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return ""
+	}
+	parts := make([]string, len(words))
+	for i, word := range words {
+		parts[i] = renderGuidanceWord(word)
+	}
+	return strings.Join(parts, helpStyle.Render(" "))
+}
+
+func renderGuidanceWord(word string) string {
+	core := strings.Trim(word, ".,;:()[]{}")
+	if !isGuidanceKey(core) {
+		return helpStyle.Render(word)
+	}
+	before, after, ok := strings.Cut(word, core)
+	if !ok {
+		return helpStyle.Render(word)
+	}
+	return helpStyle.Render(before) +
+		helpKeyStyle.Render(core) +
+		helpStyle.Render(after)
+}
+
+func isGuidanceKey(word string) bool {
+	switch strings.ToLower(word) {
+	case "enter", "esc", "s", "q", "/", "g/g", "←/→", "↑/↓", "↵":
+		return true
+	default:
+		return false
+	}
 }

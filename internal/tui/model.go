@@ -1,26 +1,29 @@
-// Package tui implements the Bubble Tea interface and owns the process
-// lifecycle: startup config resolution and loading, node selection and
-// switching, persisted settings, the log sink, and the connection table.
-//
-// One Model drives every view state. Config is read once at startup, so file
-// edits take effect on restart rather than being reloaded.
+// Package tui implements terminal interaction and the session connection projection.
+// Process resources and service execution are supplied by the application.
 package tui
 
 import (
 	"time"
 
-	"github.com/rbee3u/efanadp/internal/x365"
-
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/rbee3u/efanadp/internal/x365"
+)
+
+type viewState int
+
+const (
+	stateNodeList viewState = iota
+	stateRunning
+	stateQuitting
 )
 
 // Model is the Bubble Tea model for the whole interface. Its methods run on the
 // single event loop goroutine and must not block; background work belongs in a
 // tea.Cmd that reports back as a message.
 type Model struct {
-	config runtimeConfig
-	deps   modelDeps
+	options Options
 
 	state    viewState
 	nodeList list.Model
@@ -37,6 +40,7 @@ type Model struct {
 	service       *runningService
 	pendingStart  *pendingStart
 	nextServiceID int
+	forceQuit     bool
 
 	connections connectionState
 
@@ -50,19 +54,57 @@ func (m *Model) Init() tea.Cmd {
 	}
 	node := *m.startupNode
 	m.startupNode = nil
-	return m.requestStartNode(node, "")
+	return m.requestStartNode(node)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if next, cmd, ok := m.handleGlobalMsg(msg); ok {
-		return next, cmd
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.resizeNodeList()
+		m.syncConnectionPageSize()
+		return m, nil
+
+	case serviceStoppedMsg:
+		cmd := m.handleServiceStopped(msg)
+		return m, cmd
+
+	case connectionEventsMsg:
+		if m.service == nil || msg.serviceID != m.service.id {
+			return m, nil
+		}
+		for _, event := range msg.events {
+			m.connections.apply(event)
+		}
+		return m, waitConnectionEvents(msg.serviceID, m.service.backend)
+
+	case runningTickMsg:
+		if m.service == nil || msg.serviceID != m.service.id {
+			return m, nil
+		}
+		m.connections.now = msg.at
+		m.clearExpiredStatus(msg.at)
+		return m, runningTick(msg.serviceID)
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q":
+			if msg.String() == "q" && m.state == stateNodeList && m.nodeList.SettingFilter() {
+				break
+			}
+			cmd := m.requestQuit()
+			return m, cmd
+		}
 	}
 
 	switch m.state {
 	case stateNodeList:
-		return m.updateNodes(msg)
+		cmd := m.updateNodes(msg)
+		return m, cmd
 	case stateRunning:
-		return m.updateRunning(msg)
+		m.updateRunning(msg)
+		return m, nil
 	case stateQuitting:
 		return m, nil
 	default:
@@ -70,50 +112,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *Model) handleGlobalMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.resizeNodeList()
-		m.syncConnectionPageSize()
-		return m, nil, true
-
-	case serviceStoppedMsg:
-		next, cmd := m.handleServiceStopped(msg)
-		return next, cmd, true
-
-	case connectionEventMsg:
-		if m.service == nil || msg.serviceID != m.service.id {
-			return m, nil, true
-		}
-		for _, event := range msg.events {
-			m.connections.apply(event)
-		}
-		return m, waitConnectionEvent(msg.serviceID, m.service.connectionEvents, m.service.eventsDone), true
-
-	case runningTickMsg:
-		if m.service == nil || msg.serviceID != m.service.id {
-			return m, nil, true
-		}
-		m.connections.now = msg.at
-		m.clearExpiredStatus(msg.at)
-		return m, runningTick(msg.serviceID), true
-
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c":
-			cmd := m.requestQuit()
-			return m, cmd, true
-		case "q":
-			if m.state == stateNodeList && m.nodeList.SettingFilter() {
-				break
-			}
-			cmd := m.requestQuit()
-			return m, cmd, true
-		}
+func (m *Model) updateRunning(msg tea.Msg) {
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return
 	}
-	return m, nil, false
+
+	switch key.String() {
+	case "s":
+		m.state = stateNodeList
+		m.clearStatus()
+		m.setModeHint("Choose a node, press ↵ to confirm switch, esc to cancel")
+		m.prepareNodeSelection()
+	case "right", "pgdown":
+		m.connections.nextPage()
+	case "left", "pgup":
+		m.connections.previousPage()
+	}
 }
 
 func (m *Model) requestQuit() tea.Cmd {
@@ -122,11 +137,10 @@ func (m *Model) requestQuit() tea.Cmd {
 		return tea.Quit
 	}
 	if m.state == stateQuitting {
-		// The first request already asked the service to stop, so this one says
-		// the shutdown is taking too long. Quitting abandons the service
-		// goroutine, which process exit reclaims anyway; without this the TUI
-		// cannot be closed at all if a teardown ever wedges.
-		m.logWarnf("[efanadp] quit requested again node=%s; abandoning service shutdown", m.service.node.Name)
+		// A second quit abandons stuck teardown; process exit reclaims the
+		// service.
+		m.forceQuit = true
+		m.options.Logger.Warnf("[efanadp] quit requested again node=%s; abandoning service shutdown", m.service.node.Name)
 		return tea.Quit
 	}
 	m.state = stateQuitting

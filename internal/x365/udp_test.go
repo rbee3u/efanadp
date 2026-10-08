@@ -32,10 +32,6 @@ func TestOpenUDPSendsCommandTwoRequest(t *testing.T) {
 	}
 }
 
-// A UDP open is shorter than a multipath one - the X365 response read is deferred
-// to the first datagram read - but the same contract holds: a failure closes the
-// stream and names the step. Each cached UDP destination owns one of these
-// streams, so a leak here accumulates per destination rather than per connection.
 func TestOpenUDPFailuresCloseStreamAndNameStage(t *testing.T) {
 	errBoom := errors.New("write failed")
 
@@ -49,9 +45,8 @@ func TestOpenUDPFailuresCloseStreamAndNameStage(t *testing.T) {
 		{
 			name:      "build request",
 			newStream: func() closeCountingTestStream { return &memoryStream{} },
-			// An unencodable port fails before anything is written.
-			destPort: -1,
-			want:     "build x365 udp request",
+			destPort:  -1,
+			want:      "build x365 udp request",
 		},
 		{
 			name:      "write request",
@@ -90,8 +85,9 @@ func TestOpenUDPFailuresCloseStreamAndNameStage(t *testing.T) {
 	}
 }
 
-func TestOpenX365UDPWrapsTransportError(t *testing.T) {
-	_, err := openX365UDP(t.Context(), Node{}, UserID{}, 0, "example.com", 53)
+func TestClientOpenUDPWrapsTransportError(t *testing.T) {
+	client := &Client{}
+	_, err := client.OpenUDP(t.Context(), "example.org", 53)
 	if err == nil {
 		t.Fatal("expected transport setup error")
 	}
@@ -106,7 +102,7 @@ func TestOpenX365UDPWrapsTransportError(t *testing.T) {
 func TestX365UDPConnFramesWrites(t *testing.T) {
 	stream := &memoryStream{}
 	conn := &x365UDPConn{stream: stream}
-	n, err := conn.Write([]byte("abc"))
+	n, err := conn.WriteDatagram([]byte("abc"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,14 +120,14 @@ func TestX365UDPConnSerializesConcurrentWrites(t *testing.T) {
 
 	firstDone := make(chan error, 1)
 	go func() {
-		_, err := conn.Write([]byte("abc"))
+		_, err := conn.WriteDatagram([]byte("abc"))
 		firstDone <- err
 	}()
 	receiveWithin(t, stream.firstHeaderWritten, "first UDP frame header")
 
 	secondDone := make(chan error, 1)
 	go func() {
-		_, err := conn.Write([]byte("de"))
+		_, err := conn.WriteDatagram([]byte("de"))
 		secondDone <- err
 	}()
 
@@ -153,11 +149,11 @@ func TestX365UDPConnSerializesConcurrentWrites(t *testing.T) {
 func TestX365UDPConnRejectsOversizedWrite(t *testing.T) {
 	stream := &memoryStream{}
 	conn := &x365UDPConn{stream: stream}
-	_, err := conn.Write(bytes.Repeat([]byte("x"), x365UDPMaxPayload+1))
+	_, err := conn.WriteDatagram(bytes.Repeat([]byte("x"), x365UDPMaxPayload+1))
 	if err == nil || !strings.Contains(err.Error(), "payload too large") {
 		t.Fatalf("expected payload too large error, got %v", err)
 	}
-	if _, err := conn.Write([]byte("ok")); err != nil {
+	if _, err := conn.WriteDatagram([]byte("ok")); err != nil {
 		t.Fatalf("valid write after rejected oversized datagram: %v", err)
 	}
 	if got, want := stream.write.Bytes(), []byte{0, 2, 'o', 'k'}; !bytes.Equal(got, want) {
@@ -170,10 +166,10 @@ func TestX365UDPConnWriteFailureIsTerminal(t *testing.T) {
 	stream := &failNthRecordingStream{failOn: 2, err: errBoom}
 	conn := &x365UDPConn{stream: stream}
 
-	if _, err := conn.Write([]byte("abc")); !errors.Is(err, errBoom) {
+	if _, err := conn.WriteDatagram([]byte("abc")); !errors.Is(err, errBoom) {
 		t.Fatalf("first write err=%v, want %v", err, errBoom)
 	}
-	if _, err := conn.Write([]byte("retry")); !errors.Is(err, errBoom) {
+	if _, err := conn.WriteDatagram([]byte("retry")); !errors.Is(err, errBoom) {
 		t.Fatalf("retry err=%v, want original terminal error", err)
 	}
 
@@ -206,7 +202,7 @@ func TestX365UDPConnReadsDatagramAfterResponse(t *testing.T) {
 	}
 	conn := &x365UDPConn{stream: stream}
 	buf := make([]byte, 8)
-	n, err := conn.Read(buf)
+	n, err := conn.ReadDatagram(buf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +216,7 @@ func TestX365UDPConnRejectsBadResponse(t *testing.T) {
 		read: *bytes.NewBufferString("NOPE\x01\x00\x03abc"),
 	}
 	conn := &x365UDPConn{stream: stream}
-	_, err := conn.Read(make([]byte, 8))
+	_, err := conn.ReadDatagram(make([]byte, 8))
 	if err == nil || !strings.Contains(err.Error(), "bad X365 response") {
 		t.Fatalf("expected bad X365 response error, got %v", err)
 	}
@@ -232,7 +228,7 @@ func TestX365UDPConnDropsRemainderWhenReadBufferTooSmall(t *testing.T) {
 	}
 	conn := &x365UDPConn{stream: stream}
 	buf := make([]byte, 3)
-	n, err := conn.Read(buf)
+	n, err := conn.ReadDatagram(buf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +237,7 @@ func TestX365UDPConnDropsRemainderWhenReadBufferTooSmall(t *testing.T) {
 	}
 
 	buf = make([]byte, 3)
-	n, err = conn.Read(buf)
+	n, err = conn.ReadDatagram(buf)
 	if err != nil {
 		t.Fatal(err)
 	}

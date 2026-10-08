@@ -11,8 +11,9 @@ import (
 	"github.com/rbee3u/efanadp/internal/x365"
 )
 
-func TestNodeItemsFilterOnNodeLabel(t *testing.T) {
-	items := nodeItems([]x365.Node{testNode()})
+func TestNodeListItemsFilterOnNodeLabel(t *testing.T) {
+	nodeList := newNodeList([]x365.Node{testNode()}, "")
+	items := nodeList.Items()
 	if len(items) != 1 {
 		t.Fatalf("len(items)=%d, want 1", len(items))
 	}
@@ -27,7 +28,8 @@ func TestNodeItemsFilterOnNodeLabel(t *testing.T) {
 		t.Fatalf("description=%q, want node server detail", item.Description())
 	}
 
-	currentItems := nodeItemsWithCurrent([]x365.Node{testNode()}, "test-node")
+	currentList := newNodeList([]x365.Node{testNode()}, "test-node")
+	currentItems := currentList.Items()
 	current := requireNodeItem(t, currentItems[0])
 	if !strings.HasSuffix(current.Title(), " (current)") {
 		t.Fatalf("current title=%q, want current marker", current.Title())
@@ -61,7 +63,7 @@ func TestNodesForDisplaySortsByRegionPriority(t *testing.T) {
 func TestNodeListViewUsesCustomHelpOnly(t *testing.T) {
 	model := newTestModel(Options{})
 	model.state = stateNodeList
-	model.nodeList = newNodeList(nodeItems([]x365.Node{testNode()}))
+	model.nodeList = newNodeList([]x365.Node{testNode()}, "")
 	model.service = &runningService{}
 
 	view := stripANSI(model.View())
@@ -86,7 +88,7 @@ func TestNodeListViewUsesCustomHelpOnly(t *testing.T) {
 func TestNodeListViewShowsStartupHelp(t *testing.T) {
 	model := newTestModel(Options{})
 	model.state = stateNodeList
-	model.nodeList = newNodeList(nodeItems([]x365.Node{testNode()}))
+	model.nodeList = newNodeList([]x365.Node{testNode()}, "")
 
 	view := stripANSI(model.View())
 	for _, want := range []string{"←/→ page", "↑/↓ select", "/ search", "↵ start node", "q quit"} {
@@ -126,7 +128,7 @@ func TestNodeListSwitchHintUsesBottomNoticeRail(t *testing.T) {
 
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 32})
 	model = requireModel(t, updated)
-	updated, _ = model.updateRunning(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	model = requireModel(t, updated)
 
 	view := stripANSI(model.View())
@@ -195,7 +197,7 @@ func TestNodeListViewShowsPaginationDots(t *testing.T) {
 	model := newTestModel(Options{})
 	model.state = stateNodeList
 	model.nodes = nodes
-	model.nodeList = newNodeList(nodeItems(nodes))
+	model.nodeList = newNodeList(nodes, "")
 
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
 	model = requireModel(t, updated)
@@ -211,11 +213,11 @@ func TestNodeListPaginationReservesHeightAtPageBoundary(t *testing.T) {
 		updated, _ := base.Update(tea.WindowSizeMsg{Width: 100, Height: height})
 		candidate := requireModel(t, updated)
 
-		noReserve := newNodeList(nil)
+		noReserve := newNodeList(nil, "")
 		noReserve.Paginator.TotalPages = 1
 		noReserve.SetSize(candidate.mainContentWidth(), candidate.nodeListHeight())
 
-		withReserve := newNodeList(nil)
+		withReserve := newNodeList(nil, "")
 		withReserve.Paginator.TotalPages = 2
 		withReserve.SetSize(candidate.mainContentWidth(), candidate.nodeListHeight())
 
@@ -235,7 +237,7 @@ func TestNodeListPaginationReservesHeightAtPageBoundary(t *testing.T) {
 
 	model.state = stateNodeList
 	model.nodes = nodes
-	model.nodeList = newNodeList(nodeItems(nodes))
+	model.nodeList = newNodeList(nodes, "")
 	model.resizeNodeList()
 
 	assertNodePaginationDots(t, model)
@@ -252,7 +254,7 @@ func TestNodeListPaginationVisibleAfterSelectingCurrentNodePage(t *testing.T) {
 
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 128, Height: 42})
 	model = requireModel(t, updated)
-	updated, _ = model.updateRunning(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	model = requireModel(t, updated)
 
 	if model.state != stateNodeList {
@@ -264,10 +266,8 @@ func TestNodeListPaginationVisibleAfterSelectingCurrentNodePage(t *testing.T) {
 	assertNodePaginationDots(t, model)
 }
 
-// assertNodePaginationDots checks the node list footer renders exactly one dot
-// per page: no fewer (dots clipped by the height budget) and no more (a dot
-// style that accidentally doubles each bullet). Bullets (U+2022) only appear in
-// the paginator here, so counting them across the whole view is unambiguous.
+// These fixtures use bullets only in the paginator, so a whole-view count
+// detects both clipped and duplicated dots.
 func assertNodePaginationDots(t *testing.T, model *Model) {
 	t.Helper()
 	pages := model.nodeList.Paginator.TotalPages
@@ -356,7 +356,6 @@ func TestWindowHeaderBannerAdaptsToTerminalSize(t *testing.T) {
 
 func TestViewFillsTerminalHeightRegardlessOfConnectionCount(t *testing.T) {
 	model := newTestModel(Options{ConfigPath: "config.yaml"})
-	model.service = &runningService{listen: "127.0.0.1:10865"}
 	setRunningNode(model, testNode())
 	model.state = stateRunning
 
@@ -382,12 +381,11 @@ func TestViewNeverExceedsTerminalHeightKeepingTopBorder(t *testing.T) {
 	sizes := []tea.WindowSizeMsg{{Width: 140, Height: 20}, {Width: 100, Height: 22}, {Width: 80, Height: 16}}
 	for _, size := range sizes {
 		model := newTestModel(Options{ConfigPath: "config.yaml"})
-		model.service = &runningService{listen: "127.0.0.1:10865"}
 		setRunningNode(model, testNode())
 		model.nodes = []x365.Node{testNode()}
 		model.state = stateNodeList
 		model.setModeHint("Choose a node, press ↵ to confirm switch, esc to cancel")
-		model.nodeList = newNodeList(nodeItemsWithCurrent(model.nodes, model.currentNodeName()))
+		model.nodeList = newNodeList(model.nodes, model.currentNodeName())
 		updated, _ := model.Update(size)
 		model = requireModel(t, updated)
 
@@ -429,7 +427,7 @@ func TestRunningSummaryShowsOnNodeAndRunningViews(t *testing.T) {
 
 	model.state = stateNodeList
 	model.nodes = []x365.Node{testNode()}
-	model.nodeList = newNodeList(nodeItemsWithCurrent(model.nodes, model.currentNodeName()))
+	model.nodeList = newNodeList(model.nodes, model.currentNodeName())
 	nodeView := stripANSI(model.View())
 	assertWindowRunningSummary(t, nodeView)
 	for _, want := range []string{
@@ -484,7 +482,6 @@ func TestLocalSOCKS5LinkUsesLoopbackForWildcardListen(t *testing.T) {
 
 func TestNarrowRunningSummaryUsesCompactMetadata(t *testing.T) {
 	model := newTestModel(Options{ConfigPath: "config.yaml"})
-	model.service = &runningService{listen: "127.0.0.1:10865"}
 	setRunningNode(model, testNode())
 	model.connections.active = map[uint64]connectionItem{1: {id: 1}}
 
@@ -509,16 +506,16 @@ func TestNarrowRunningSummaryUsesCompactMetadata(t *testing.T) {
 func TestNodeListEscClearsFilterBeforeReturning(t *testing.T) {
 	model := newTestModel(Options{})
 	model.state = stateNodeList
-	model.nodeList = newNodeList(nodeItems([]x365.Node{testNode()}))
+	model.nodeList = newNodeList([]x365.Node{testNode()}, "")
 	model.service = &runningService{}
 
-	updated, _ := model.updateNodes(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	model = requireModel(t, updated)
 	if !model.nodeList.SettingFilter() {
 		t.Fatal("expected slash to enter filter mode")
 	}
 
-	updated, _ = model.updateNodes(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	model = requireModel(t, updated)
 	if model.state != stateNodeList {
 		t.Fatalf("state=%v, want nodes after clearing filter", model.state)
@@ -527,7 +524,7 @@ func TestNodeListEscClearsFilterBeforeReturning(t *testing.T) {
 		t.Fatal("expected esc to clear filter before returning to running view")
 	}
 
-	updated, _ = model.updateNodes(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	model = requireModel(t, updated)
 	if model.state != stateRunning {
 		t.Fatalf("state=%v, want running after second esc", model.state)
@@ -537,7 +534,7 @@ func TestNodeListEscClearsFilterBeforeReturning(t *testing.T) {
 func TestNodeListFilterConsumesShortcutKeys(t *testing.T) {
 	model := newTestModel(Options{})
 	model.state = stateNodeList
-	model.nodeList = newNodeList(nodeItems([]x365.Node{testNode()}))
+	model.nodeList = newNodeList([]x365.Node{testNode()}, "")
 	model.service = &runningService{}
 
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
@@ -562,7 +559,7 @@ func TestNodeListFilterConsumesShortcutKeys(t *testing.T) {
 func TestNodeListUsesMainPaneDimensions(t *testing.T) {
 	model := newTestModel(Options{})
 	model.state = stateNodeList
-	model.nodeList = newNodeList(nodeItems([]x365.Node{testNode()}))
+	model.nodeList = newNodeList([]x365.Node{testNode()}, "")
 
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
 	model = requireModel(t, updated)
@@ -592,13 +589,13 @@ func TestRunningSwitchResetsNodeListToCurrentNode(t *testing.T) {
 	model := newTestModel(Options{})
 	model.state = stateRunning
 	model.nodes = []x365.Node{other, current}
-	model.nodeList = newNodeList(nodeItems(model.nodes))
+	model.nodeList = newNodeList(model.nodes, "")
 	model.service = &runningService{}
 	setRunningNode(model, current)
 	model.nodeList.SetFilterText("other")
 	model.nodeList.Select(0)
 
-	updated, _ := model.updateRunning(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	model = requireModel(t, updated)
 	if model.state != stateNodeList {
 		t.Fatalf("state=%v, want nodes", model.state)

@@ -34,10 +34,6 @@ func TestParseNodeKeepsPrivateFingerprint(t *testing.T) {
 	}
 }
 
-// url.URL.String inserts the path separator itself, but the Referer header is
-// built by concatenating host and path, so a path without a leading slash would
-// send "https://example.netnode" on a transport meant to look like ordinary
-// browser traffic.
 func TestParseNodeNormalizesPathSeparator(t *testing.T) {
 	tests := []struct {
 		name string
@@ -107,10 +103,6 @@ func TestParseNodeRejectsInvalidPort(t *testing.T) {
 	}
 }
 
-// ParseNode is the gate every configured node passes through, so it is where the
-// REALITY material is rejected before a node reaches the list. The error travels
-// to the TUI and the log file, so it must name the failure without carrying the
-// provider host, path, or key material that produced it.
 func TestParseNodeRejectsInvalidRealityMaterialWithoutLeakingNodeMaterial(t *testing.T) {
 	tests := []struct {
 		name string

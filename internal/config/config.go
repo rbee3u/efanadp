@@ -1,10 +1,6 @@
-// Package config loads the single runtime configuration snapshot used for one
-// process lifetime, accepting either a decrypted proxies map or the committed
-// template plus a locally supplied UUID. It also generates the sanitized
-// config.reference.yaml template.
-//
-// Parsed values carry private account and provider material. Keep them out of
-// diagnostics and error text; see docs/privacy.md.
+// Package config parses runtime YAML and generates UUID-stripped reference
+// templates. Parsed account and provider values are private; omit them from
+// diagnostics.
 package config
 
 import (
@@ -17,6 +13,7 @@ import (
 
 	"github.com/goccy/go-yaml"
 
+	"github.com/rbee3u/efanadp/internal/sniff"
 	"github.com/rbee3u/efanadp/internal/x365"
 )
 
@@ -26,34 +23,11 @@ type Config struct {
 	Listen                  string
 	Log                     LogConfig
 	Nodes                   []x365.Node
-	ShadowsocksSniffConfigs []x365.ShadowsocksSniffConfig
+	ShadowsocksSniffConfigs []sniff.ShadowsocksConfig
 }
 
-// LogConfig controls the minimum level, encoding, and output destination.
-type LogConfig struct {
-	Level  string
-	Format string
-	Output string
-}
-
-// Defaults applied to omitted config fields. DefaultListen stays on loopback
-// because the adapter serves SOCKS5 no-auth only; DefaultLogOutput is relative
-// to the working directory.
-const (
-	DefaultListen    = "127.0.0.1:10865"
-	DefaultLogLevel  = "info"
-	DefaultLogOutput = "logs/app.log"
-	DefaultLogFormat = "text"
-)
-
-// DefaultLogConfig returns the logging policy used for omitted log fields.
-func DefaultLogConfig() LogConfig {
-	return LogConfig{
-		Level:  DefaultLogLevel,
-		Output: DefaultLogOutput,
-		Format: DefaultLogFormat,
-	}
-}
+// DefaultListen stays on loopback because the adapter serves SOCKS5 no-auth only.
+const DefaultListen = "127.0.0.1:10865"
 
 // Load reads and validates one runtime configuration file. YAML errors retain
 // their reason and position but omit source excerpts that may contain private
@@ -78,7 +52,7 @@ type rawConfig struct {
 	ProxiesTmpl string        `yaml:"proxies_tmpl"`
 	ProxiesUUID string        `yaml:"proxies_uuid"`
 	Sniff       struct {
-		Shadowsocks []x365.ShadowsocksSniffConfig `yaml:"shadowsocks"`
+		Shadowsocks []rawShadowsocksSniffConfig `yaml:"shadowsocks"`
 	} `yaml:"sniff"`
 }
 
@@ -86,20 +60,18 @@ func readRawConfig(data []byte) (rawConfig, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	var raw rawConfig
 	if err := decoder.Decode(&raw); err != nil && !errors.Is(err, io.EOF) {
-		return rawConfig{}, fmt.Errorf("parse YAML: %s", safeYAMLError(err))
+		return rawConfig{}, configError(InvalidYAML, fmt.Errorf("parse YAML: %s", safeYAMLError(err)))
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err == nil {
 		return rawConfig{}, errors.New("multiple YAML documents are not supported")
 	} else if !errors.Is(err, io.EOF) {
-		return rawConfig{}, fmt.Errorf("parse YAML: %s", safeYAMLError(err))
+		return rawConfig{}, configError(InvalidYAML, fmt.Errorf("parse YAML: %s", safeYAMLError(err)))
 	}
 	return raw, nil
 }
 
-// safeYAMLError keeps the parser's reason and source position without its
-// default source excerpt. Config lines can contain account and node material,
-// so returning the excerpt would leak private values through TUI or CLI errors.
+// Omit YAML source excerpts because they may contain private node material.
 func safeYAMLError(err error) string {
 	return strings.TrimSpace(yaml.FormatError(err, false, false))
 }
@@ -115,7 +87,7 @@ func parseConfigBytes(data []byte) (Config, error) {
 		return Config{}, err
 	}
 
-	sniffConfigs, err := x365.NormalizeShadowsocksSniffConfigs(raw.Sniff.Shadowsocks)
+	sniffConfigs, err := normalizeShadowsocksSniffConfigs(raw.Sniff.Shadowsocks)
 	if err != nil {
 		return Config{}, err
 	}
@@ -140,6 +112,19 @@ func parseConfigBytes(data []byte) (Config, error) {
 	}, nil
 }
 
+func runtimeConfigFromRaw(raw rawConfig) (listen string, log LogConfig, err error) {
+	if raw.LogPath != nil {
+		return "", LogConfig{}, errors.New("log_path is no longer supported; use log.output")
+	}
+
+	logConfig, err := normalizeLogConfig(raw.Log)
+	if err != nil {
+		return "", LogConfig{}, err
+	}
+
+	return defaultListen(raw.Listen), logConfig, nil
+}
+
 func parseProxyNodes(proxies yaml.MapSlice) ([]x365.Node, error) {
 	nodes := make([]x365.Node, 0, len(proxies))
 	for _, item := range proxies {
@@ -161,7 +146,7 @@ func parseProxyNodes(proxies yaml.MapSlice) ([]x365.Node, error) {
 		}
 	}
 	if len(nodes) == 0 {
-		return nil, errors.New("proxies field contains no x365 nodes")
+		return nil, configError(NoNodes, errors.New("proxies field contains no x365 nodes"))
 	}
 	return nodes, nil
 }

@@ -40,116 +40,12 @@ func BenchmarkActiveConnectionsView(b *testing.B) {
 	}
 }
 
-func TestConnectionEventWaiterDrainsQueuedBurst(t *testing.T) {
-	events := newConnectionQueue()
-	stopped := make(chan struct{})
-	for i := range 5 {
-		events.push(proxy.Event{ID: uint64(i + 1), Type: proxy.ConnectionOpened, Stats: &proxy.Stats{}})
-	}
-
-	msg, ok := waitConnectionEvent(3, events, stopped)().(connectionEventMsg)
-	if !ok {
-		t.Fatal("waiter did not produce a connectionEventMsg")
-	}
-	if len(msg.events) != 5 {
-		t.Fatalf("drained %d events, want the whole queued burst of 5", len(msg.events))
-	}
-	if left := events.take(); left != nil {
-		t.Fatalf("%d events left queued, want the queue emptied in one wake", len(left))
-	}
-}
-
-// The producer runs on proxy goroutines and cannot block on the UI, but a
-// dropped ConnectionClosed is unrecoverable: nothing else tells the model that
-// connection ended, so its row would stay active forever.
-func TestConnectionQueueKeepsEveryLifecycleEventUnderBurst(t *testing.T) {
-	events := newConnectionQueue()
-	const connections = 5000
-	for i := range connections {
-		id := uint64(i + 1)
-		events.push(proxy.Event{ID: id, Type: proxy.ConnectionOpened, Stats: &proxy.Stats{}})
-		events.push(proxy.Event{ID: id, Type: proxy.ConnectionClosed, Stats: &proxy.Stats{}})
-	}
-
-	model := newTestModel(Options{})
-	model.service = &runningService{id: 1, connectionEvents: events, eventsDone: make(chan struct{})}
-	updated, _ := model.Update(connectionEventMsg{serviceID: 1, events: events.take()})
-	model = requireModel(t, updated)
-
-	if got := model.connections.activeCount(); got != 0 {
-		t.Fatalf("active connections=%d, want 0; a dropped close leaves a phantom row", got)
-	}
-	if model.connections.closed != connections {
-		t.Fatalf("closed connections=%d, want %d", model.connections.closed, connections)
-	}
-}
-
-// Updates only carry the newest label for a connection, so coalescing them is
-// what keeps the queue bounded without dropping opens or closes.
-func TestConnectionQueueCoalescesRepeatedUpdates(t *testing.T) {
-	events := newConnectionQueue()
-	events.push(proxy.Event{ID: 1, Type: proxy.ConnectionOpened, Target: "example.org:443"})
-	for i := range 100 {
-		events.push(proxy.Event{
-			ID:     1,
-			Type:   proxy.ConnectionUpdated,
-			Target: fmt.Sprintf("example.org:443->example.net:%d", 1000+i),
-		})
-	}
-	events.push(proxy.Event{ID: 2, Type: proxy.ConnectionOpened, Target: "example.net:80"})
-
-	batch := events.take()
-	if len(batch) != 3 {
-		t.Fatalf("queued %d events, want 3 (two opens plus one coalesced update)", len(batch))
-	}
-	if want := "example.org:443->example.net:1099"; batch[1].Target != want {
-		t.Fatalf("coalesced update target=%q, want the newest %q", batch[1].Target, want)
-	}
-	if batch[2].ID != 2 {
-		t.Fatalf("last queued event ID=%d, want the later open for 2", batch[2].ID)
-	}
-}
-
-// The queue coalesces updates by tracking each connection's pending update index.
-// A closed connection never gets another update, so its entry has to go: a long
-// session of short-lived connections would otherwise grow the map without bound.
-func TestConnectionQueueForgetsClosedConnections(t *testing.T) {
-	queue := newConnectionQueue()
-	const connections = 100
-
-	for i := range connections {
-		id := uint64(i + 1)
-		queue.push(proxy.Event{ID: id, Type: proxy.ConnectionOpened, Target: "example.org:443"})
-		for j := range 10 {
-			queue.push(proxy.Event{
-				ID:     id,
-				Type:   proxy.ConnectionUpdated,
-				Target: fmt.Sprintf("example.org:443->update-%d", j),
-			})
-		}
-		queue.push(proxy.Event{ID: id, Type: proxy.ConnectionClosed})
-	}
-
-	queue.mu.Lock()
-	tracked := len(queue.updates)
-	queue.mu.Unlock()
-	if tracked != 0 {
-		t.Fatalf("tracked update entries=%d after every connection closed, want 0", tracked)
-	}
-
-	// Coalescing must not lose the lifecycle events themselves.
-	events := queue.take()
-	if len(events) != connections*3 {
-		t.Fatalf("queued events=%d, want %d (open + one coalesced update + close each)", len(events), connections*3)
-	}
-}
-
 func TestConnectionEventsUpdateActiveAndClosedCounts(t *testing.T) {
 	model := newTestModel(Options{})
-	model.service = &runningService{id: 7, connectionEvents: newConnectionQueue()}
+	model.service = &runningService{id: 7, backend: newFakeService()}
 	startedAt := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
 
-	updated, _ := model.Update(connectionEventMsg{
+	updated, _ := model.Update(connectionEventsMsg{
 		serviceID: 7,
 		events: []proxy.Event{{
 			ID:        1,
@@ -161,7 +57,7 @@ func TestConnectionEventsUpdateActiveAndClosedCounts(t *testing.T) {
 		}},
 	})
 	model = requireModel(t, updated)
-	if got := model.connections.activeCount(); got != 1 {
+	if got := len(model.connections.active); got != 1 {
 		t.Fatalf("active connections=%d, want 1", got)
 	}
 	if got := model.connections.active[1].protocol; got != "udp" {
@@ -174,7 +70,7 @@ func TestConnectionEventsUpdateActiveAndClosedCounts(t *testing.T) {
 		t.Fatalf("status=%q, want connection events to keep transient status unchanged", model.status)
 	}
 
-	updated, _ = model.Update(connectionEventMsg{
+	updated, _ = model.Update(connectionEventsMsg{
 		serviceID: 7,
 		events: []proxy.Event{{
 			ID:        1,
@@ -189,11 +85,11 @@ func TestConnectionEventsUpdateActiveAndClosedCounts(t *testing.T) {
 	if got := model.connections.active[1].target; got != "example.com:443->inner.example:443" {
 		t.Fatalf("connection target=%q, want updated chain", got)
 	}
-	if got := model.connections.activeCount(); got != 1 {
+	if got := len(model.connections.active); got != 1 {
 		t.Fatalf("active connections=%d, want 1 after update", got)
 	}
 
-	updated, _ = model.Update(connectionEventMsg{
+	updated, _ = model.Update(connectionEventsMsg{
 		serviceID: 7,
 		events: []proxy.Event{{
 			ID:        1,
@@ -205,7 +101,7 @@ func TestConnectionEventsUpdateActiveAndClosedCounts(t *testing.T) {
 		}},
 	})
 	model = requireModel(t, updated)
-	if got := model.connections.activeCount(); got != 0 {
+	if got := len(model.connections.active); got != 0 {
 		t.Fatalf("active connections=%d, want 0", got)
 	}
 	if model.connections.closed != 1 {
@@ -258,7 +154,7 @@ func TestRunningViewShowsPagedActiveConnections(t *testing.T) {
 		t.Fatalf("view includes second page connection on first page:\n%s", view)
 	}
 
-	updated, _ := model.updateRunning(tea.KeyMsg{Type: tea.KeyPgDown})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
 	model = requireModel(t, updated)
 	view = stripANSI(model.View())
 	if got := strings.Count(view, "•"); got != 2 {
@@ -289,7 +185,7 @@ func TestConnectionPageClampsAfterResize(t *testing.T) {
 	if model.connections.page != 0 {
 		t.Fatalf("connection page=%d, want clamped first page after resize", model.connections.page)
 	}
-	rows, total := model.connections.pageItems(model.connections.page)
+	rows, total := model.connections.pageItems()
 	if total != 3 || len(rows) == 0 {
 		t.Fatalf("page rows=%d total=%d, want non-empty clamped page", len(rows), total)
 	}
@@ -309,13 +205,8 @@ func TestRunningViewAlwaysShowsPagingHelp(t *testing.T) {
 	}
 }
 
-// With nothing connected the table collapses to a placeholder rather than padding
-// out a full page of blank rows.
 func TestConnectionRowsUseCompactEmptyState(t *testing.T) {
-	var empty strings.Builder
-	writeConnectionRows(&empty, nil, time.Time{}, 100, 0, connectionPageSize, 0)
-
-	view := stripANSI(empty.String())
+	view := stripANSI(renderConnectionTable(nil, time.Time{}, 100, 0, connectionPageSize, 0))
 	if got := strings.Count(view, "\n"); got >= connectionPageSize {
 		t.Fatalf("empty connection rows=%d, want compact empty state", got)
 	}
@@ -327,15 +218,12 @@ func TestConnectionRowsUseCompactEmptyState(t *testing.T) {
 	}
 }
 
-// One row renders its protocol, endpoints, age, and transfer counters as bare
-// values in table columns, and a single page shows no pagination.
 func TestConnectionRowsRenderSingleConnectionAsBareColumns(t *testing.T) {
 	stats := &proxy.Stats{}
 	stats.AddUpload(1536)
 	stats.AddDownload(42)
 
-	var one strings.Builder
-	writeConnectionRows(&one, []connectionItem{{
+	table := renderConnectionTable([]connectionItem{{
 		id:        1,
 		protocol:  "udp",
 		source:    "client",
@@ -344,7 +232,7 @@ func TestConnectionRowsRenderSingleConnectionAsBareColumns(t *testing.T) {
 		stats:     stats,
 	}}, time.Date(2026, 6, 30, 12, 0, 1, 0, time.UTC), 100, 0, connectionPageSize, 1)
 
-	view := stripANSI(one.String())
+	view := stripANSI(table)
 	if got := strings.Count(view, "\n"); got >= 10 {
 		t.Fatalf("one connection rows=%d, want compact table:\n%s", got, view)
 	}
@@ -363,7 +251,6 @@ func TestConnectionPaginationDotsStayPinnedAcrossPages(t *testing.T) {
 	const total = 25 // three pages: 10, 10, 5
 
 	dotLine := func(page int) int {
-		var b strings.Builder
 		var rows []connectionItem
 		start, end, _ := pageRange(page, total, pageSize)
 		for i := start; i < end; i++ {
@@ -374,14 +261,14 @@ func TestConnectionPaginationDotsStayPinnedAcrossPages(t *testing.T) {
 			id := uint64(i) + 1
 			rows = append(rows, connectionItem{id: id})
 		}
-		writeConnectionRows(&b, rows, time.Time{}, 100, page, pageSize, total)
-		lines := strings.Split(stripANSI(b.String()), "\n")
+		table := renderConnectionTable(rows, time.Time{}, 100, page, pageSize, total)
+		lines := strings.Split(stripANSI(table), "\n")
 		for i, line := range lines {
 			if strings.Contains(line, "•") {
 				return i
 			}
 		}
-		t.Fatalf("page %d has no pagination dots:\n%s", page, b.String())
+		t.Fatalf("page %d has no pagination dots:\n%s", page, table)
 		return -1
 	}
 
@@ -402,9 +289,8 @@ func TestConnectionPaginationRendersOneDotPerPage(t *testing.T) {
 		{total: 25, pageSize: 10, page: 2, wantDots: 3}, // last of three pages
 	}
 	for _, tc := range cases {
-		var b strings.Builder
-		writeConnectionRows(&b, nil, time.Time{}, 100, tc.page, tc.pageSize, tc.total)
-		view := stripANSI(b.String())
+		table := renderConnectionTable(nil, time.Time{}, 100, tc.page, tc.pageSize, tc.total)
+		view := stripANSI(table)
 		if got := strings.Count(view, "•"); got != tc.wantDots {
 			t.Fatalf("total=%d pageSize=%d page=%d: dots=%d, want exactly one per page (%d)\n%s",
 				tc.total, tc.pageSize, tc.page, got, tc.wantDots, view)
@@ -413,15 +299,14 @@ func TestConnectionPaginationRendersOneDotPerPage(t *testing.T) {
 }
 
 func TestConnectionRowsTruncateLongTargets(t *testing.T) {
-	var b strings.Builder
-	writeConnectionRows(&b, []connectionItem{{
+	table := renderConnectionTable([]connectionItem{{
 		id:        28,
 		source:    "127.0.0.1:59322",
 		target:    "203.0.113.10:39281->very-long-service-name.with.many.labels.example.com:443",
 		startedAt: time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC),
 	}}, time.Date(2026, 6, 30, 12, 0, 31, 0, time.UTC), 78, 0, connectionPageSize, 1)
 
-	view := stripANSI(b.String())
+	view := stripANSI(table)
 	if !strings.Contains(view, "Target") {
 		t.Fatalf("connection table missing target header:\n%s", view)
 	}
@@ -493,8 +378,8 @@ func TestConnectionTargetColumnCapsAtEighty(t *testing.T) {
 		startedAt: time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC),
 	}
 	layout := newConnectionTableLayout([]connectionItem{row}, time.Date(2026, 6, 30, 12, 0, 31, 0, time.UTC), 220)
-	if layout.toWidth != 80 {
-		t.Fatalf("target column width=%d, want 80", layout.toWidth)
+	if layout.targetWidth != 80 {
+		t.Fatalf("target column width=%d, want 80", layout.targetWidth)
 	}
 
 	rendered := stripANSI(renderConnectionRow(row, time.Date(2026, 6, 30, 12, 0, 31, 0, time.UTC), layout))
@@ -517,7 +402,7 @@ func TestRunningConnectionPagesUseArrowKeys(t *testing.T) {
 	}
 	model.status = model.runningStatus()
 
-	updated, _ := model.updateRunning(tea.KeyMsg{Type: tea.KeyRight})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRight})
 	model = requireModel(t, updated)
 	if model.connections.page != 1 {
 		t.Fatalf("connection page=%d, want next page", model.connections.page)
@@ -526,12 +411,30 @@ func TestRunningConnectionPagesUseArrowKeys(t *testing.T) {
 		t.Fatalf("status=%q, want running status without page text", model.status)
 	}
 
-	updated, _ = model.updateRunning(tea.KeyMsg{Type: tea.KeyLeft})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyLeft})
 	model = requireModel(t, updated)
 	if model.connections.page != 0 {
 		t.Fatalf("connection page=%d, want previous page", model.connections.page)
 	}
 	if strings.Contains(model.status, "page 1/2") || !strings.Contains(model.status, "Running") {
 		t.Fatalf("status=%q, want running status without page text", model.status)
+	}
+}
+
+func TestConnectionEventWaiterDrainsQueuedBurst(t *testing.T) {
+	service := newFakeService()
+	for i := range 5 {
+		service.events = append(service.events, proxy.Event{ID: uint64(i + 1), Type: proxy.ConnectionOpened, Stats: &proxy.Stats{}})
+	}
+
+	msg, ok := waitConnectionEvents(3, service)().(connectionEventsMsg)
+	if !ok {
+		t.Fatal("waiter did not produce a connectionEventsMsg")
+	}
+	if len(msg.events) != 5 {
+		t.Fatalf("drained %d events, want the whole queued burst of 5", len(msg.events))
+	}
+	if left := service.NextEvents(); left != nil {
+		t.Fatalf("%d events left queued, want the queue emptied in one wake", len(left))
 	}
 }

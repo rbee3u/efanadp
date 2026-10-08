@@ -38,15 +38,14 @@ func TestManualX365UDPProbe(t *testing.T) {
 		t.Fatalf("EFANADP_NODE_INDEX=%d out of range; config has %d nodes", nodeIndex, len(loaded.Nodes))
 	}
 	node := loaded.Nodes[nodeIndex]
-	userID, err := x365.ParseUserID(node.UUID)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	const probeTimeout = 20 * time.Second
 	ctx, cancel := context.WithTimeout(t.Context(), probeTimeout)
 	defer cancel()
-	client := x365.NewClient(node, userID, 10*time.Second)
+	client, err := x365.NewClient(node, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
 	conn, err := client.OpenUDP(ctx, "1.1.1.1", 53)
 	if err != nil {
 		t.Fatal(err)
@@ -56,7 +55,7 @@ func TestManualX365UDPProbe(t *testing.T) {
 	}()
 
 	query := manualDNSQuery("example.com")
-	if _, err := conn.Write(query); err != nil {
+	if _, err := conn.WriteDatagram(query); err != nil {
 		t.Fatal(err)
 	}
 
@@ -67,7 +66,7 @@ func TestManualX365UDPProbe(t *testing.T) {
 	resultCh := make(chan readResult, 1)
 	go func() {
 		buf := make([]byte, 1500)
-		n, err := conn.Read(buf)
+		n, err := conn.ReadDatagram(buf)
 		resultCh <- readResult{packet: buf[:n], err: err}
 	}()
 

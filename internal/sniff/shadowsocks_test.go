@@ -1,4 +1,4 @@
-package x365
+package sniff
 
 import (
 	"bytes"
@@ -12,7 +12,7 @@ import (
 )
 
 func TestSniffShadowsocksTargetAddressTypes(t *testing.T) {
-	config := ShadowsocksSniffConfig{
+	config := ShadowsocksConfig{
 		Server:   "203.0.113.10",
 		Port:     39281,
 		Method:   "aes-256-gcm",
@@ -41,15 +41,15 @@ func TestSniffShadowsocksTargetAddressTypes(t *testing.T) {
 	}
 }
 
-func TestShadowsocksTargetSnifferWaitsForCompleteFirstChunk(t *testing.T) {
-	config := ShadowsocksSniffConfig{
+func TestShadowsocksTCPSnifferWaitsForCompleteFirstChunk(t *testing.T) {
+	config := ShadowsocksConfig{
 		Server:   "203.0.113.10",
 		Port:     39281,
 		Method:   "chacha20-ietf-poly1305",
 		Password: "secret",
 	}
 	packet := buildShadowsocksFirstPacket(t, config, encodeShadowsocksTarget(t, "inner.example:443"))
-	sniffer := NewShadowsocksTargetSniffer([]ShadowsocksSniffConfig{config}, "203.0.113.10", 39281)
+	sniffer := NewShadowsocksTCPSniffer([]ShadowsocksConfig{config}, "203.0.113.10", 39281)
 	if sniffer == nil {
 		t.Fatal("expected sniffer")
 	}
@@ -65,9 +65,6 @@ func TestShadowsocksTargetSnifferWaitsForCompleteFirstChunk(t *testing.T) {
 	}
 }
 
-// A 2022 password is either a single PSK or server:user, and the second form puts
-// an EIH block between the salt and the ciphertext. Both have to reach the same
-// target, since the shape decides where the sniffer starts reading.
 func TestSniffShadowsocks2022Target(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -85,7 +82,7 @@ func TestSniffShadowsocks2022Target(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := ShadowsocksSniffConfig{
+			config := ShadowsocksConfig{
 				Server:   "203.0.113.10",
 				Port:     39281,
 				Method:   "2022-blake3-aes-256-gcm",
@@ -106,71 +103,26 @@ func TestSniffShadowsocks2022Target(t *testing.T) {
 func TestSniffShadowsocks2022UDPRejectsShortEIHPacket(t *testing.T) {
 	serverKey := base64.StdEncoding.EncodeToString(testBytes(32, 0x40))
 	userKey := base64.StdEncoding.EncodeToString(testBytes(32, 0x80))
-	config := ShadowsocksSniffConfig{
+	config := ShadowsocksConfig{
 		Method:   "2022-blake3-aes-256-gcm",
 		Password: serverKey + ":" + userKey,
 	}
-	spec, ok := ssCipherSpecForMethod(config.Method)
+	spec, ok := shadowsocksCipherSpecForMethod(config.Method)
 	if !ok {
 		t.Fatal("missing cipher spec")
 	}
-	candidate, ok := shadowsocks2022UDPKeyCandidateFor(config.Password, spec.keySize)
+	keys, ok := parseShadowsocks2022UDPKeys(config.Password, spec.keySize)
 	if !ok {
-		t.Fatal("expected UDP key candidate")
+		t.Fatal("expected UDP keys")
 	}
 	minPacketLen := aes.BlockSize +
-		candidate.eihLen +
+		keys.eihLen +
 		shadowsocks2022UDPHeaderLen +
 		shadowsocksAEADTagSize
 	packet := make([]byte, minPacketLen-1)
 
-	if target, ok := sniffShadowsocks2022UDPTargetWithKey(candidate, spec, packet); ok {
+	if target, ok := sniffShadowsocks2022UDPTargetWithKey(keys, spec, packet); ok {
 		t.Fatalf("target=%q, want short packet rejected", target)
-	}
-}
-
-func TestNormalizeShadowsocksSniffConfigs(t *testing.T) {
-	got, err := NormalizeShadowsocksSniffConfigs([]ShadowsocksSniffConfig{{
-		Name:     " landing ",
-		Server:   " 203.0.113.10 ",
-		Port:     39281,
-		Cipher:   " AES-256-GCM ",
-		Password: "secret",
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("len(configs)=%d, want 1", len(got))
-	}
-	if got[0].Name != "landing" || got[0].Server != "203.0.113.10" {
-		t.Fatalf("config trim result=%+v", got[0])
-	}
-	if got[0].Method != "aes-256-gcm" || got[0].Cipher != "" {
-		t.Fatalf("method=%q cipher=%q, want normalized method and empty cipher", got[0].Method, got[0].Cipher)
-	}
-}
-
-func TestNormalizeShadowsocksSniffConfigsRejectsInvalidConfig(t *testing.T) {
-	_, err := NormalizeShadowsocksSniffConfigs([]ShadowsocksSniffConfig{{
-		Server: "203.0.113.10",
-		Port:   70000,
-		Method: "aes-256-gcm",
-	}})
-	if err == nil {
-		t.Fatal("expected invalid sniff config error")
-	}
-}
-
-func TestFormatTargetChain(t *testing.T) {
-	if got := FormatTargetChain("outer.example:443", "inner.example:443"); got != "outer.example:443->inner.example:443" {
-		t.Fatalf("target chain=%q, want outer->inner", got)
-	}
-	if got := FormatTargetChain("outer.example:443", ""); got != "outer.example:443" {
-		t.Fatalf("empty inner chain=%q, want outer", got)
-	}
-	if got := FormatTargetChain("outer.example:443", "outer.example:443"); got != "outer.example:443" {
-		t.Fatalf("same inner chain=%q, want outer", got)
 	}
 }
 
@@ -228,54 +180,54 @@ func unixEpochForTest(t *testing.T, at time.Time) uint64 {
 	return uint64(epoch)
 }
 
-func TestShadowsocks2022UDPKeyCandidateFor(t *testing.T) {
+func TestParseShadowsocks2022UDPKeys(t *testing.T) {
 	serverKey := testBytes(32, 0x40)
 	userKey := testBytes(32, 0x80)
 	password := base64.StdEncoding.EncodeToString(serverKey) + ":" + base64.StdEncoding.EncodeToString(userKey)
 
-	candidate, ok := shadowsocks2022UDPKeyCandidateFor(password, 32)
+	keys, ok := parseShadowsocks2022UDPKeys(password, 32)
 	if !ok {
-		t.Fatal("expected UDP key candidate")
+		t.Fatal("expected UDP keys")
 	}
-	if !bytes.Equal(candidate.blockKey, serverKey) {
-		t.Fatalf("block key=%x, want %x", candidate.blockKey, serverKey)
+	if !bytes.Equal(keys.blockKey, serverKey) {
+		t.Fatalf("block key=%x, want %x", keys.blockKey, serverKey)
 	}
-	if !bytes.Equal(candidate.userKey, userKey) {
-		t.Fatalf("user key=%x, want %x", candidate.userKey, userKey)
+	if !bytes.Equal(keys.userKey, userKey) {
+		t.Fatalf("user key=%x, want %x", keys.userKey, userKey)
 	}
-	if candidate.eihLen != 16 {
-		t.Fatalf("eih len=%d, want 16", candidate.eihLen)
+	if keys.eihLen != 16 {
+		t.Fatalf("eih len=%d, want 16", keys.eihLen)
 	}
 
-	candidate, ok = shadowsocks2022UDPKeyCandidateFor(base64.StdEncoding.EncodeToString(userKey), 32)
+	keys, ok = parseShadowsocks2022UDPKeys(base64.StdEncoding.EncodeToString(userKey), 32)
 	if !ok {
-		t.Fatal("expected single-password UDP key candidate")
+		t.Fatal("expected single-password UDP keys")
 	}
-	if !bytes.Equal(candidate.blockKey, userKey) || !bytes.Equal(candidate.userKey, userKey) || candidate.eihLen != 0 {
-		t.Fatalf("single password candidate=%+v, want same block/user key and no EIH", candidate)
+	if !bytes.Equal(keys.blockKey, userKey) || !bytes.Equal(keys.userKey, userKey) || keys.eihLen != 0 {
+		t.Fatalf("single password keys=%+v, want same block/user key and no EIH", keys)
 	}
 
-	if _, ok := shadowsocks2022UDPKeyCandidateFor("not-a-valid-psk", 32); ok {
+	if _, ok := parseShadowsocks2022UDPKeys("not-a-valid-psk", 32); ok {
 		t.Fatal("invalid PSK was accepted")
 	}
 }
 
-func TestShadowsocks2022KeyCandidateUsesLastEIHKey(t *testing.T) {
+func TestParseShadowsocks2022TCPKeysUsesLastEIHKey(t *testing.T) {
 	userKey := testBytes(32, 0x80)
-	candidate, ok := shadowsocks2022KeyCandidateFor("not-a-valid-block-key:"+base64.StdEncoding.EncodeToString(userKey), 32)
+	keys, ok := parseShadowsocks2022TCPKeys("not-a-valid-block-key:"+base64.StdEncoding.EncodeToString(userKey), 32)
 	if !ok {
-		t.Fatal("expected key candidate")
+		t.Fatal("expected keys")
 	}
-	if !bytes.Equal(candidate.userKey, userKey) {
-		t.Fatalf("candidate key=%x, want %x", candidate.userKey, userKey)
+	if !bytes.Equal(keys.userKey, userKey) {
+		t.Fatalf("user key=%x, want %x", keys.userKey, userKey)
 	}
-	if candidate.eihLen != 16 {
-		t.Fatalf("candidate EIH len=%d, want 16", candidate.eihLen)
+	if keys.eihLen != 16 {
+		t.Fatalf("EIH len=%d, want 16", keys.eihLen)
 	}
 }
 
 func TestShadowsocksSnifferFallsBackOnFailures(t *testing.T) {
-	config := ShadowsocksSniffConfig{
+	config := ShadowsocksConfig{
 		Server:   "203.0.113.10",
 		Port:     39281,
 		Method:   "aes-128-gcm",
@@ -290,25 +242,19 @@ func TestShadowsocksSnifferFallsBackOnFailures(t *testing.T) {
 
 	unsupported := config
 	unsupported.Method = "2022-blake3-chacha20-poly1305"
-	if limit := shadowsocksSniffBufferLimit(unsupported.Method); limit != 0 {
-		t.Fatalf("unsupported limit=%d, want 0", limit)
+	if sniffer := NewShadowsocksTCPSniffer([]ShadowsocksConfig{unsupported}, unsupported.Server, unsupported.Port); sniffer != nil {
+		t.Fatal("expected no sniffer for unsupported method")
 	}
-	if sniffer := NewShadowsocksTargetSniffer([]ShadowsocksSniffConfig{config}, "203.0.113.1", 39281); sniffer != nil {
+	if sniffer := NewShadowsocksTCPSniffer([]ShadowsocksConfig{config}, "203.0.113.1", 39281); sniffer != nil {
 		t.Fatal("expected no sniffer for non-matching outer target")
 	}
 }
 
-// Every supported UDP key shape has to yield the inner destination, through both
-// paths that can produce it: the per-datagram helper and the cached sniffer the
-// relay actually uses. The literal target is asserted rather than only compared
-// between the two, because agreeing paths can still agree on a wrong answer.
-// Sniffing is display-only, so a wrong answer mislabels a connection in the TUI
-// and the log rather than misrouting it.
 func TestShadowsocksUDPSnifferReadsInnerTarget(t *testing.T) {
 	// buildShadowsocksUDPPacket encodes this destination into every fixture.
 	const wantTarget = "inner.example:5353"
 
-	configs := []ShadowsocksSniffConfig{
+	configs := []ShadowsocksConfig{
 		{
 			Server:   "203.0.113.10",
 			Port:     39281,
@@ -344,8 +290,6 @@ func TestShadowsocksUDPSnifferReadsInnerTarget(t *testing.T) {
 			if sniffer == nil {
 				t.Fatal("expected sniffer for matching outer target")
 			}
-			// Reused across datagrams, so the cached key material has to keep
-			// producing the same answer rather than only working once.
 			for attempt := range 3 {
 				got, ok := sniffer.Sniff(packet)
 				if !ok || got != wantTarget {
@@ -357,33 +301,32 @@ func TestShadowsocksUDPSnifferReadsInnerTarget(t *testing.T) {
 }
 
 func TestShadowsocksUDPSnifferSkipsUnmatchedAndUnsupported(t *testing.T) {
-	config := ShadowsocksSniffConfig{
+	config := ShadowsocksConfig{
 		Server:   "203.0.113.10",
 		Port:     39281,
 		Method:   "aes-256-gcm",
 		Password: "secret",
 	}
-	if sniffer := NewShadowsocksUDPSniffer([]ShadowsocksSniffConfig{config}, "203.0.113.11", 39281); sniffer != nil {
+	if sniffer := NewShadowsocksUDPSniffer([]ShadowsocksConfig{config}, "203.0.113.11", 39281); sniffer != nil {
 		t.Fatal("expected no sniffer for non-matching host")
 	}
-	if sniffer := NewShadowsocksUDPSniffer([]ShadowsocksSniffConfig{config}, "203.0.113.10", 39282); sniffer != nil {
+	if sniffer := NewShadowsocksUDPSniffer([]ShadowsocksConfig{config}, "203.0.113.10", 39282); sniffer != nil {
 		t.Fatal("expected no sniffer for non-matching port")
 	}
 
 	unsupported := config
 	unsupported.Method = "2022-blake3-chacha20-poly1305"
-	if sniffer := NewShadowsocksUDPSniffer([]ShadowsocksSniffConfig{unsupported}, unsupported.Server, unsupported.Port); sniffer != nil {
+	if sniffer := NewShadowsocksUDPSniffer([]ShadowsocksConfig{unsupported}, unsupported.Server, unsupported.Port); sniffer != nil {
 		t.Fatal("expected no sniffer for unsupported method")
 	}
 
 	badPSK := config
 	badPSK.Method = "2022-blake3-aes-256-gcm"
 	badPSK.Password = "not-a-32-byte-psk"
-	if sniffer := NewShadowsocksUDPSniffer([]ShadowsocksSniffConfig{badPSK}, badPSK.Server, badPSK.Port); sniffer != nil {
+	if sniffer := NewShadowsocksUDPSniffer([]ShadowsocksConfig{badPSK}, badPSK.Server, badPSK.Port); sniffer != nil {
 		t.Fatal("expected no sniffer for undecodable 2022 PSK")
 	}
 
-	// A nil sniffer is the no-match result and must stay callable.
 	var nilSniffer *ShadowsocksUDPSniffer
 	if target, ok := nilSniffer.Sniff([]byte("anything")); ok || target != "" {
 		t.Fatalf("nil sniffer target=%q ok=%v, want no target", target, ok)
@@ -391,13 +334,13 @@ func TestShadowsocksUDPSnifferSkipsUnmatchedAndUnsupported(t *testing.T) {
 }
 
 func BenchmarkShadowsocksUDPSnifferSniff(b *testing.B) {
-	config := ShadowsocksSniffConfig{
+	config := ShadowsocksConfig{
 		Server:   "203.0.113.10",
 		Port:     39281,
 		Method:   "2022-blake3-aes-256-gcm",
 		Password: base64.StdEncoding.EncodeToString(testBytes(32, 0x20)),
 	}
-	configs := []ShadowsocksSniffConfig{config}
+	configs := []ShadowsocksConfig{config}
 	packet := buildShadowsocksUDPPacket(b, config, []byte("dns"))
 
 	b.Run("cached", func(b *testing.B) {
@@ -423,7 +366,7 @@ func BenchmarkShadowsocksUDPSnifferSniff(b *testing.B) {
 }
 
 func BenchmarkShadowsocksSnifferObserve(b *testing.B) {
-	config := ShadowsocksSniffConfig{
+	config := ShadowsocksConfig{
 		Server:   "203.0.113.10",
 		Port:     39281,
 		Method:   "aes-256-gcm",
@@ -432,7 +375,7 @@ func BenchmarkShadowsocksSnifferObserve(b *testing.B) {
 	packet := buildShadowsocksFirstPacket(b, config, encodeShadowsocksTarget(b, "inner.example:443"))
 	b.ReportAllocs()
 	for b.Loop() {
-		sniffer := NewShadowsocksTargetSniffer([]ShadowsocksSniffConfig{config}, "203.0.113.10", 39281)
+		sniffer := NewShadowsocksTCPSniffer([]ShadowsocksConfig{config}, "203.0.113.10", 39281)
 		if sniffer == nil {
 			b.Fatal("expected sniffer")
 		}
@@ -443,9 +386,9 @@ func BenchmarkShadowsocksSnifferObserve(b *testing.B) {
 	}
 }
 
-func buildShadowsocksFirstPacket(tb testing.TB, config ShadowsocksSniffConfig, payload []byte) []byte {
+func buildShadowsocksFirstPacket(tb testing.TB, config ShadowsocksConfig, payload []byte) []byte {
 	tb.Helper()
-	spec, ok := ssCipherSpecForMethod(config.Method)
+	spec, ok := shadowsocksCipherSpecForMethod(config.Method)
 	if !ok {
 		tb.Fatalf("unsupported method %q", config.Method)
 	}
@@ -475,9 +418,9 @@ func buildShadowsocksFirstPacket(tb testing.TB, config ShadowsocksSniffConfig, p
 	return packet
 }
 
-func buildShadowsocksUDPPacket(tb testing.TB, config ShadowsocksSniffConfig, payload []byte) []byte {
+func buildShadowsocksUDPPacket(tb testing.TB, config ShadowsocksConfig, payload []byte) []byte {
 	tb.Helper()
-	spec, ok := ssCipherSpecForMethod(config.Method)
+	spec, ok := shadowsocksCipherSpecForMethod(config.Method)
 	if !ok {
 		tb.Fatalf("unsupported method %q", config.Method)
 	}
@@ -497,20 +440,21 @@ func buildShadowsocksUDPPacket(tb testing.TB, config ShadowsocksSniffConfig, pay
 		tb.Fatal(err)
 	}
 	packet := append([]byte{}, salt...)
+	//nolint:gosec // G407: the first AEAD packet uses the protocol-required zero nonce with its salt-derived key.
 	packet = aead.Seal(packet, make([]byte, aead.NonceSize()), plaintext, nil)
 	return packet
 }
 
 func buildShadowsocks2022UDPPacket(
 	tb testing.TB,
-	config ShadowsocksSniffConfig,
-	spec ssCipherSpec,
+	config ShadowsocksConfig,
+	spec shadowsocksCipherSpec,
 	payload []byte,
 ) []byte {
 	tb.Helper()
-	candidate, ok := shadowsocks2022UDPKeyCandidateFor(config.Password, spec.keySize)
+	keys, ok := parseShadowsocks2022UDPKeys(config.Password, spec.keySize)
 	if !ok {
-		tb.Fatal("missing 2022 key candidate")
+		tb.Fatal("missing 2022 keys")
 	}
 	sessionID := uint64(0x0102030405060708)
 	packetID := uint64(0x1112131415161718)
@@ -524,20 +468,20 @@ func buildShadowsocks2022UDPPacket(
 	body = append(body, payload...)
 
 	sessionSalt := packetHeader[:8]
-	sessionKey := deriveShadowsocks2022Subkey(candidate.userKey, sessionSalt, spec.keySize)
+	sessionKey := deriveShadowsocks2022Subkey(keys.userKey, sessionSalt, spec.keySize)
 	aead, err := spec.newAEAD(sessionKey)
 	if err != nil {
 		tb.Fatal(err)
 	}
 	encryptedBody := aead.Seal(nil, packetHeader[4:16], body, nil)
-	block, err := aes.NewCipher(candidate.blockKey)
+	block, err := aes.NewCipher(keys.blockKey)
 	if err != nil {
 		tb.Fatal(err)
 	}
 	block.Encrypt(packetHeader, packetHeader)
 	packet := append([]byte{}, packetHeader...)
-	if candidate.eihLen > 0 {
-		packet = append(packet, testBytes(candidate.eihLen, 0xa0)...)
+	if keys.eihLen > 0 {
+		packet = append(packet, testBytes(keys.eihLen, 0xa0)...)
 	}
 	packet = append(packet, encryptedBody...)
 	return packet
@@ -545,17 +489,17 @@ func buildShadowsocks2022UDPPacket(
 
 func buildShadowsocks2022FirstPacket(
 	tb testing.TB,
-	config ShadowsocksSniffConfig,
-	spec ssCipherSpec,
+	config ShadowsocksConfig,
+	spec shadowsocksCipherSpec,
 	salt []byte,
 	payload []byte,
 ) []byte {
 	tb.Helper()
-	candidate, ok := shadowsocks2022KeyCandidateFor(config.Password, spec.keySize)
+	keys, ok := parseShadowsocks2022TCPKeys(config.Password, spec.keySize)
 	if !ok {
-		tb.Fatal("missing 2022 key candidate")
+		tb.Fatal("missing 2022 keys")
 	}
-	subkey := deriveShadowsocks2022Subkey(candidate.userKey, salt, spec.keySize)
+	subkey := deriveShadowsocks2022Subkey(keys.userKey, salt, spec.keySize)
 	aead, err := spec.newAEAD(subkey)
 	if err != nil {
 		tb.Fatal(err)
@@ -567,8 +511,8 @@ func buildShadowsocks2022FirstPacket(
 	binary.BigEndian.PutUint64(fixedHeader[1:9], mustCurrentUnixUint64(tb))
 	binary.BigEndian.PutUint16(fixedHeader[9:11], mustUint16(tb, len(payload), "payload length"))
 	packet := append([]byte{}, salt...)
-	if candidate.eihLen > 0 {
-		packet = append(packet, testBytes(candidate.eihLen, 0xa0)...)
+	if keys.eihLen > 0 {
+		packet = append(packet, testBytes(keys.eihLen, 0xa0)...)
 	}
 	packet = append(packet, aead.Seal(nil, nonce, fixedHeader, nil)...)
 	incrementShadowsocksNonce(nonce)

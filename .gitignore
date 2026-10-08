@@ -1,6 +1,6 @@
 .DS_Store
 /.idea/
-/bin/
+/dist/
 /logs/
 /config.yaml
 /settings.json

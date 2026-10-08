@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+
+	"github.com/rbee3u/efanadp/internal/datagram"
 )
 
 func TestServeSOCKSUsesConfiguredLogger(t *testing.T) {
@@ -269,7 +271,7 @@ func TestHandleSOCKSConnUDPAssociateRelaysDatagrams(t *testing.T) {
 			logCh <- fmt.Sprintf(format, args...)
 		}},
 		Upstream: testUpstream{
-			openUDP: func(ctx context.Context, host string, port int) (io.ReadWriteCloser, error) {
+			openUDP: func(ctx context.Context, host string, port int) (datagram.Conn, error) {
 				opened <- net.JoinHostPort(host, strconv.Itoa(port))
 				return fakeUpstream, nil
 			},
@@ -361,7 +363,7 @@ type testLogger struct {
 
 type testUpstream struct {
 	openTCP func(context.Context, string, int) (io.ReadWriteCloser, error)
-	openUDP func(context.Context, string, int) (io.ReadWriteCloser, error)
+	openUDP func(context.Context, string, int) (datagram.Conn, error)
 }
 
 func (u testUpstream) OpenTCP(ctx context.Context, host string, port int) (io.ReadWriteCloser, error) {
@@ -371,7 +373,7 @@ func (u testUpstream) OpenTCP(ctx context.Context, host string, port int) (io.Re
 	return u.openTCP(ctx, host, port)
 }
 
-func (u testUpstream) OpenUDP(ctx context.Context, host string, port int) (io.ReadWriteCloser, error) {
+func (u testUpstream) OpenUDP(ctx context.Context, host string, port int) (datagram.Conn, error) {
 	if u.openUDP == nil {
 		return nil, fmt.Errorf("unexpected UDP open: %s", net.JoinHostPort(host, strconv.Itoa(port)))
 	}
@@ -586,7 +588,7 @@ func newFakeUDPStream() *fakeUDPStream {
 	}
 }
 
-func (s *fakeUDPStream) Read(p []byte) (int, error) {
+func (s *fakeUDPStream) ReadDatagram(p []byte) (int, error) {
 	select {
 	case payload := <-s.reads:
 		return copy(p, payload), nil
@@ -595,7 +597,7 @@ func (s *fakeUDPStream) Read(p []byte) (int, error) {
 	}
 }
 
-func (s *fakeUDPStream) Write(p []byte) (int, error) {
+func (s *fakeUDPStream) WriteDatagram(p []byte) (int, error) {
 	payload := append([]byte(nil), p...)
 	select {
 	case s.writes <- payload:
@@ -653,3 +655,6 @@ func (s *closeBlockingStream) releaseClose() {
 		close(s.allowClose)
 	})
 }
+
+func (s *closeBlockingStream) ReadDatagram(p []byte) (int, error)  { return s.Read(p) }
+func (s *closeBlockingStream) WriteDatagram(p []byte) (int, error) { return s.Write(p) }

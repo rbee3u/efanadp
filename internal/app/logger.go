@@ -1,4 +1,4 @@
-package tui
+package app
 
 import (
 	"fmt"
@@ -13,29 +13,12 @@ import (
 	"github.com/rbee3u/efanadp/internal/config"
 )
 
-type appLog interface {
-	Infof(format string, args ...any)
-	Warnf(format string, args ...any)
-	Errorf(format string, args ...any)
-}
-
-type noopLogger struct{}
-
-func (noopLogger) Infof(string, ...any)  {}
-func (noopLogger) Warnf(string, ...any)  {}
-func (noopLogger) Errorf(string, ...any) {}
-
 type appLogger struct {
 	logger *slog.Logger
 	closer io.Closer
 }
 
-// Log rotation bounds. lumberjack retains every rotated file when MaxBackups
-// and MaxAge are both zero, so a chatty run would grow the log directory without
-// limit; relay logs are per-connection and per-dropped-datagram, which makes
-// that a realistic way to fill a disk. These caps keep the worst case at
-// MaxSize * (MaxBackups + 1) on disk while leaving enough history to diagnose a
-// problem reported after the fact.
+// Cap retained log history; zero MaxBackups and MaxAge would keep every backup.
 const (
 	logMaxSizeMB  = 100
 	logMaxBackups = 4

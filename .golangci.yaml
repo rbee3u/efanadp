@@ -61,12 +61,12 @@ linters:
         text: "G304: Potential file inclusion via variable"
         linters:
           - gosec
-      - path: internal/(app/config_reference|config/config|tui/settings)\.go
+      - path: internal/(app/config_reference|config/config|app/settings)\.go
         source: "^\\s*data, err := os\\.ReadFile\\((input|path)\\)"
         text: "G304: Potential file inclusion via variable"
         linters:
           - gosec
-      - path: internal/x365/ss_sniff_cipher\.go
+      - path: internal/sniff/shadowsocks_cipher\.go
         text: "G401|G501|G505"
         linters:
           - gosec
@@ -88,6 +88,46 @@ linters:
               desc: use in-process APIs instead of spawning commands
             - pkg: math/rand$
               desc: use crypto/rand for security-sensitive randomness
+        core-without-ui:
+          files:
+            - '**/internal/**/*.go'
+            - '!**/internal/app/**'
+            - '!**/internal/tui/**'
+            - '!$test'
+          deny:
+            - pkg: github.com/rbee3u/efanadp/internal/app
+              desc: app owns process wiring; core packages must not depend on it
+            - pkg: github.com/rbee3u/efanadp/internal/tui
+              desc: terminal interaction belongs in tui
+            - pkg: github.com/charmbracelet/
+              desc: terminal libraries belong in tui
+        relay-without-application:
+          files:
+            - '**/internal/{proxy,x365,sniff,datagram,human}/*.go'
+            - '!$test'
+          deny:
+            - pkg: github.com/rbee3u/efanadp/internal/config
+              desc: receive normalized runtime values instead of loading application config
+            - pkg: github.com/rbee3u/efanadp/internal/session
+              desc: session owns service execution and depends on the relay layers
+        proxy-without-carrier:
+          files:
+            - '**/internal/proxy/*.go'
+            - '!$test'
+          deny:
+            - pkg: github.com/rbee3u/efanadp/internal/x365
+              desc: use Upstream and standard stream errors instead of the X365 implementation
+        sniff-without-relay:
+          files:
+            - '**/internal/sniff/*.go'
+            - '!$test'
+          deny:
+            - pkg: github.com/rbee3u/efanadp/internal/proxy
+              desc: sniff inspects payloads without owning relay or routing
+            - pkg: github.com/rbee3u/efanadp/internal/x365
+              desc: sniff must not depend on the carrier
+            - pkg: github.com/goccy/go-yaml
+              desc: YAML parsing and normalization belong in config
     errcheck:
       check-type-assertions: true
     exhaustive:

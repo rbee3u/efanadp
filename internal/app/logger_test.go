@@ -1,4 +1,4 @@
-package tui
+package app
 
 import (
 	"bytes"
@@ -14,10 +14,6 @@ import (
 	"github.com/rbee3u/efanadp/internal/config"
 )
 
-// The text format is what a user reads with tail, so the level and the formatted
-// message both have to be there. A nested output path is created rather than
-// failing, because the default output is logs/app.log under a fresh working
-// directory.
 func TestAppLoggerWritesTextLogFile(t *testing.T) {
 	text := string(writeAppLog(t, config.LogConfig{
 		Level:  "info",
@@ -34,8 +30,6 @@ func TestAppLoggerWritesTextLogFile(t *testing.T) {
 	}
 }
 
-// The json format feeds log collectors, so it has to be one parseable object per
-// line with the level and message in their own fields, not a formatted string.
 func TestAppLoggerWritesJSONLogFile(t *testing.T) {
 	data := writeAppLog(t, config.LogConfig{
 		Level:  "info",
@@ -57,8 +51,6 @@ func TestAppLoggerWritesJSONLogFile(t *testing.T) {
 	}
 }
 
-// Relay logging is per-connection, so the configured level is what keeps a busy
-// run from filling the log with lines the user asked not to see.
 func TestAppLoggerFiltersByLevel(t *testing.T) {
 	text := string(writeAppLog(t, config.LogConfig{
 		Level:  "warn",
@@ -77,9 +69,7 @@ func TestAppLoggerFiltersByLevel(t *testing.T) {
 	}
 }
 
-// writeAppLog runs write against a logger built from cfg, then returns what landed
-// in cfg.Output. Rotation is replaced with a plain file so the bytes are readable
-// at a known path.
+// Use a plain file so log bytes remain at a known path without rotation.
 func writeAppLog(t *testing.T, cfg config.LogConfig, write func(*appLogger)) []byte {
 	t.Helper()
 	usePlainLogFiles(t)
@@ -100,9 +90,7 @@ func writeAppLog(t *testing.T, cfg config.LogConfig, write func(*appLogger)) []b
 	return data
 }
 
-// lumberjack retains every rotated file when MaxBackups and MaxAge are both
-// zero. Relay logs are per-connection, so an unbounded log directory is a
-// realistic way to fill a disk during a long run.
+// Zero MaxBackups and MaxAge would disable lumberjack's retention limits.
 func TestRotatingLogWriterBoundsRetainedFiles(t *testing.T) {
 	writer, err := newRotatingLogWriter(filepath.Join(t.TempDir(), "app.log"))
 	if err != nil {
@@ -141,9 +129,6 @@ func usePlainLogFiles(t *testing.T) {
 	})
 }
 
-// The standard streams are borrowed, not owned, so logWriter must return no
-// closer for them: closing os.Stdout on a node switch would take the TUI's own
-// output with it for the rest of the process.
 func TestLogWriterSpecialOutputsDoNotCloseStdStreams(t *testing.T) {
 	tests := []struct {
 		output string

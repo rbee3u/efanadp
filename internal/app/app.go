@@ -10,16 +10,15 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/rbee3u/efanadp/internal/tui"
 )
 
-const appShort = "Local SOCKS5 adapter for decrypted efanapp x365 nodes"
-
 // Run dispatches the TUI and maintenance subcommands for args.
 func Run(args []string) error {
-	return runArgs(args, runTUI, os.Stdout)
+	return runArgs(args, func(configPath string) error {
+		return runInteractive(configPath, tui.Run)
+	}, os.Stdout)
 }
 
 func runArgs(args []string, runTUI func(configPath string) error, stdout io.Writer) error {
@@ -62,15 +61,17 @@ func runHelp(args []string, stdout io.Writer) error {
 	return fmt.Errorf("unknown help topic %q", strings.Join(args, " "))
 }
 
-func runTUI(configPath string) error {
-	return tui.Run(tui.Options{
-		ConfigPath:       configPath,
-		Timeout:          10 * time.Second,
-		HandshakeTimeout: 15 * time.Second,
-	})
-}
-
 func printRootHelp(w io.Writer) error {
-	_, err := fmt.Fprintf(w, "efanadp\n\n%s\n\nUsage:\n  efanadp [--config path]\n  efanadp config-reference [--in path] [--out path]\n\nFlags:\n  -c, --config string   config file path\n", appShort)
+	_, err := io.WriteString(w, `efanadp
+
+Local SOCKS5 adapter for decrypted efanapp x365 nodes
+
+Usage:
+  efanadp [--config path]
+  efanadp config-reference [--in path] [--out path]
+
+Flags:
+  -c, --config string   config file path
+`)
 	return err
 }

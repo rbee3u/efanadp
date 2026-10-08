@@ -7,21 +7,15 @@ import (
 	"sync"
 )
 
-type relayTask func() error
-
-// runRelayPair runs both directions and returns once both have finished. stop
-// runs after whichever direction ends first, so the caller uses it to unblock the
-// other; it is wrapped to run once, letting each task call it unconditionally.
-// The reported error is the first one worth surfacing: a direction ending because
-// its peer went away is expected here, so benign errors are filtered and a clean
-// shutdown reports nil.
-func runRelayPair(stop func(), left, right relayTask) error {
+// runRelayPair waits for both directions. stop runs once after the first
+// finishes and must unblock the other. The first non-benign error is returned.
+func runRelayPair(stop func(), left, right func() error) error {
 	if stop != nil {
 		stop = sync.OnceFunc(stop)
 	}
 
 	errCh := make(chan error, 2)
-	run := func(task relayTask) {
+	run := func(task func() error) {
 		err := task()
 		if stop != nil {
 			stop()
@@ -29,18 +23,17 @@ func runRelayPair(stop func(), left, right relayTask) error {
 		errCh <- err
 	}
 
-	var group sync.WaitGroup
-	group.Go(func() { run(left) })
-	group.Go(func() { run(right) })
-	group.Wait()
-	close(errCh)
+	go run(left)
+	go run(right)
 
-	for err := range errCh {
-		if err != nil && !isBenignClientError(err) {
-			return err
+	var firstErr error
+	for range 2 {
+		err := <-errCh
+		if firstErr == nil && err != nil && !isBenignClientError(err) {
+			firstErr = err
 		}
 	}
-	return nil
+	return firstErr
 }
 
 const relayBufferSize = 32 * 1024
@@ -64,20 +57,6 @@ func copyWithPooledBuffer(dst io.Writer, src io.Reader) error {
 	return err
 }
 
-func writeFull(w io.Writer, p []byte) error {
-	for len(p) > 0 {
-		n, err := w.Write(p)
-		if err != nil {
-			return err
-		}
-		if n <= 0 {
-			return io.ErrShortWrite
-		}
-		p = p[n:]
-	}
-	return nil
-}
-
 func relayTCP(
 	ctx context.Context,
 	client net.Conn,
@@ -92,7 +71,7 @@ func relayTCP(
 		closeQuietly(upstream)
 		closeQuietly(client)
 	})
-	stopClosing := runWhenContextDone(relayCtx, closeBoth)
+	stopClosing := context.AfterFunc(relayCtx, closeBoth)
 	defer func() {
 		stopClosing()
 		closeBoth()
@@ -103,40 +82,30 @@ func relayTCP(
 		closeBoth()
 	}
 	upload := func() error {
-		writer := uploadObserver{
+		writer := relayWriter{
 			writer:  upstream,
 			observe: observeUpload,
+			add:     liveStats.AddUpload,
 		}
-		return copyWithPooledBuffer(
-			countingWriter{writer: writer, add: liveStats.AddUpload},
-			client,
-		)
+		return copyWithPooledBuffer(writer, client)
 	}
 	download := func() error {
-		return copyWithPooledBuffer(countingWriter{writer: client, add: liveStats.AddDownload}, upstream)
+		return copyWithPooledBuffer(relayWriter{writer: client, add: liveStats.AddDownload}, upstream)
 	}
 
 	return runRelayPair(stopRelay, upload, download)
 }
 
-type uploadObserver struct {
+type relayWriter struct {
 	writer  io.Writer
 	observe func([]byte)
+	add     func(int64)
 }
 
-func (w uploadObserver) Write(p []byte) (int, error) {
+func (w relayWriter) Write(p []byte) (int, error) {
 	if w.observe != nil && len(p) > 0 {
 		w.observe(p)
 	}
-	return w.writer.Write(p)
-}
-
-type countingWriter struct {
-	writer io.Writer
-	add    func(int64)
-}
-
-func (w countingWriter) Write(p []byte) (int, error) {
 	n, err := w.writer.Write(p)
 	if n > 0 && w.add != nil {
 		w.add(int64(n))

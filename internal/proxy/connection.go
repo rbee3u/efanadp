@@ -58,8 +58,7 @@ func (s *Stats) AddDownload(n int64) {
 	}
 }
 
-// Upload returns the bytes sent so far, or 0 for a nil receiver. The counter
-// keeps advancing while a connection is open, so two reads can differ.
+// Upload returns the current byte count, or 0 for a nil receiver.
 func (s *Stats) Upload() int64 {
 	if s == nil {
 		return 0
@@ -67,8 +66,7 @@ func (s *Stats) Upload() int64 {
 	return s.upload.Load()
 }
 
-// Download returns the bytes received so far, with the same liveness caveat as
-// Upload.
+// Download returns the current byte count, or 0 for a nil receiver.
 func (s *Stats) Download() int64 {
 	if s == nil {
 		return 0
@@ -84,10 +82,7 @@ type connectionTracker struct {
 	startedAt time.Time
 	stats     *Stats
 
-	// mu guards target. A UDP association refreshes the label from every target
-	// open goroutine and from its client relay loop, so the compare-and-set in
-	// updateTarget has to be atomic; two destinations opening at once otherwise
-	// race on the field.
+	// mu guards target updates from concurrent UDP target goroutines.
 	mu     sync.Mutex
 	target string
 }
@@ -107,27 +102,17 @@ func newConnectionTracker(cfg Config, protocol, source, target string) *connecti
 func (t *connectionTracker) open() {
 	target := t.currentTarget()
 	t.cfg.infof("[%s #%d] open source=%s target=%s", t.protocol, t.id, t.source, target)
-	t.cfg.emitConnection(Event{
-		ID:        t.id,
-		Type:      ConnectionOpened,
-		Protocol:  t.protocol,
-		Source:    t.source,
-		Target:    target,
-		StartedAt: t.startedAt,
-		Stats:     t.stats,
-	})
+	t.emitEvent(ConnectionOpened, target)
 }
 
-// currentTarget returns the label the connection currently carries.
 func (t *connectionTracker) currentTarget() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.target
 }
 
-// updateTarget sets the connection label and reports whether it changed. The log
-// and event stay outside the lock so an OnConnection callback never runs with it
-// held.
+// Publish logs and events outside the lock so callbacks cannot deadlock the
+// tracker.
 func (t *connectionTracker) updateTarget(target string) bool {
 	t.mu.Lock()
 	if t.target == target {
@@ -138,15 +123,7 @@ func (t *connectionTracker) updateTarget(target string) bool {
 	t.mu.Unlock()
 
 	t.cfg.infof("[%s #%d] update source=%s target=%s", t.protocol, t.id, t.source, target)
-	t.cfg.emitConnection(Event{
-		ID:        t.id,
-		Type:      ConnectionUpdated,
-		Protocol:  t.protocol,
-		Source:    t.source,
-		Target:    target,
-		StartedAt: t.startedAt,
-		Stats:     t.stats,
-	})
+	t.emitEvent(ConnectionUpdated, target)
 	return true
 }
 
@@ -159,14 +136,28 @@ func (t *connectionTracker) close(err error) {
 	} else {
 		t.cfg.infof("[%s #%d] close source=%s target=%s time=%s up=%s down=%s", t.protocol, t.id, t.source, target, human.ShortDuration(time.Since(t.startedAt)), human.FormatBytes(upload), human.FormatBytes(download))
 	}
-	t.cfg.emitConnection(Event{
+	t.emitEvent(ConnectionClosed, target)
+}
+
+func (t *connectionTracker) emitEvent(kind EventType, target string) {
+	event := Event{
 		ID:        t.id,
-		Type:      ConnectionClosed,
+		Type:      kind,
 		Protocol:  t.protocol,
 		Source:    t.source,
 		Target:    target,
 		StartedAt: t.startedAt,
-		ClosedAt:  time.Now(),
 		Stats:     t.stats,
-	})
+	}
+	if kind == ConnectionClosed {
+		event.ClosedAt = time.Now()
+	}
+	t.cfg.emitConnection(event)
+}
+
+func formatTargetChain(outer, inner string) string {
+	if inner == "" || inner == outer {
+		return outer
+	}
+	return outer + "->" + inner
 }

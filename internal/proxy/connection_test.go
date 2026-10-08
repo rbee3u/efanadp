@@ -32,9 +32,6 @@ func TestConnectionTrackerCloseUsesUpdatedTarget(t *testing.T) {
 	}
 }
 
-// A UDP association refreshes the connection label from every target open
-// goroutine and from its client relay loop as datagrams sniff chains, so
-// concurrent updates must not race on the tracker's target field.
 func TestConnectionTrackerUpdateTargetIsThreadSafe(t *testing.T) {
 	var mu sync.Mutex
 	tracker := newConnectionTracker(Config{
@@ -54,5 +51,17 @@ func TestConnectionTrackerUpdateTargetIsThreadSafe(t *testing.T) {
 
 	if tracker.currentTarget() == "" {
 		t.Fatal("tracker target is empty after concurrent updates")
+	}
+}
+
+func TestFormatTargetChain(t *testing.T) {
+	if got := formatTargetChain("outer.example:443", "inner.example:443"); got != "outer.example:443->inner.example:443" {
+		t.Fatalf("target chain=%q, want outer->inner", got)
+	}
+	if got := formatTargetChain("outer.example:443", ""); got != "outer.example:443" {
+		t.Fatalf("empty inner chain=%q, want outer", got)
+	}
+	if got := formatTargetChain("outer.example:443", "outer.example:443"); got != "outer.example:443" {
+		t.Fatalf("same inner chain=%q, want outer", got)
 	}
 }

@@ -1,10 +1,6 @@
-// Package proxy serves the local SOCKS5 listener and relays accepted requests
-// through an Upstream. It covers CONNECT over a single upstream stream,
-// UDP_ASSOCIATE with per-destination stream caching, local SOCKS UDP envelope
-// handling, and per-connection accounting reported through Config's hooks.
-//
-// The server speaks SOCKS5 no-auth only and assumes a loopback listener; it is
-// not a multi-user deployment.
+// Package proxy serves a local SOCKS5 no-auth listener, relays TCP and UDP
+// through an Upstream, and reports connection events. It assumes a trusted
+// host.
 package proxy
 
 import (
@@ -14,22 +10,22 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/rbee3u/efanadp/internal/datagram"
 	"github.com/rbee3u/efanadp/internal/human"
-	"github.com/rbee3u/efanadp/internal/x365"
+	"github.com/rbee3u/efanadp/internal/sniff"
 )
 
 // Upstream opens X365-carried streams for SOCKS destinations. Implementations
 // must honor context cancellation and return streams whose Close unblocks I/O.
+// Normal closure must use standard stream errors (such as io.ErrClosedPipe or
+// net.ErrClosed); carrier-specific errors are translated by the implementation.
 type Upstream interface {
 	OpenTCP(ctx context.Context, destHost string, destPort int) (io.ReadWriteCloser, error)
-	// OpenUDP returns a stream carrying one datagram per Read or Write rather
-	// than a byte stream, so the relay must not split or coalesce payloads.
-	OpenUDP(ctx context.Context, destHost string, destPort int) (io.ReadWriteCloser, error)
+	OpenUDP(ctx context.Context, destHost string, destPort int) (datagram.Conn, error)
 }
 
 // Logger receives relay messages from concurrent connection goroutines.
@@ -51,7 +47,7 @@ type Config struct {
 	HandshakeTimeout time.Duration
 
 	// ShadowsocksSniffConfigs affects target labels only, never routing.
-	ShadowsocksSniffConfigs []x365.ShadowsocksSniffConfig
+	ShadowsocksSniffConfigs []sniff.ShadowsocksConfig
 
 	// Logger is optional; nil disables relay logging.
 	Logger Logger
@@ -108,9 +104,6 @@ func serveSOCKS(ctx context.Context, ln net.Listener, cfg Config) error {
 
 var errAcceptLoopClosed = errors.New("accept loop closed")
 
-// Accept retry pacing after a recoverable failure: short enough that the proxy
-// resumes as soon as capacity frees up, capped so a persistent shortage does not
-// spin.
 const (
 	acceptRetryDelayMin = 5 * time.Millisecond
 	acceptRetryDelayMax = time.Second
@@ -136,24 +129,15 @@ func acceptSOCKSConnections(ctx context.Context, ln net.Listener, cfg Config, ha
 		}
 		retryDelay = 0
 		handlers.Go(func() {
-			if err := handleSOCKSConn(ctx, conn, cfg); err != nil {
-				if isBenignClientError(err) {
-					return
-				}
+			if err := handleSOCKSConn(ctx, conn, cfg); err != nil && !isBenignClientError(err) {
 				cfg.warnf("[efanadp] client failed: %v", err)
 			}
 		})
 	}
 }
 
-// isRecoverableAcceptError reports whether the accept loop should keep serving.
-//
-// Descriptor and buffer exhaustion is the realistic failure here, because every
-// proxied connection holds an upstream socket and every cached UDP destination
-// holds another, so a busy client can push the process to its limit while the
-// listener itself stays healthy. Returning the error instead would stop the
-// whole SOCKS service over a shortage that clears on its own as connections
-// close, leaving the user to notice and restart it.
+// Resource exhaustion can clear as connections close; it must not stop an
+// otherwise healthy listener.
 func isRecoverableAcceptError(err error) bool {
 	return errors.Is(err, syscall.EMFILE) ||
 		errors.Is(err, syscall.ENFILE) ||
@@ -168,7 +152,6 @@ func nextAcceptRetryDelay(current time.Duration) time.Duration {
 	return min(2*current, acceptRetryDelayMax)
 }
 
-// waitBeforeAcceptRetry reports false when the service stopped while waiting.
 func waitBeforeAcceptRetry(ctx context.Context, delay time.Duration) bool {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
@@ -186,7 +169,7 @@ func handleSOCKSConn(ctx context.Context, client net.Conn, cfg Config) error {
 	defer stopClosingClient()
 
 	reader := bufio.NewReader(client)
-	request, err := readSOCKSRequest(client, reader, cfg.HandshakeTimeout)
+	request, err := negotiateSOCKSRequest(client, reader, cfg.HandshakeTimeout)
 	if err != nil {
 		return err
 	}
@@ -206,10 +189,10 @@ func handleSOCKSConnect(ctx context.Context, client net.Conn, reader *bufio.Read
 		return fmt.Errorf("SOCKS5 request got mihomo fake-ip %s; use socks5h:// so the proxy receives the domain", request.Host)
 	}
 
-	tracker := newConnectionTracker(cfg, "tcp", client.RemoteAddr().String(), request.Address)
+	tracker := newConnectionTracker(cfg, "tcp", client.RemoteAddr().String(), request.address())
 	tracker.open()
 
-	upstream, err := cfg.dialTCP(ctx, request.Host, request.Port)
+	upstream, err := cfg.openTCP(ctx, request.Host, request.Port)
 	if err != nil {
 		writeSOCKSReplyQuietly(client, socksReplyConnectionRefused)
 		tracker.close(err)
@@ -225,14 +208,14 @@ func handleSOCKSConnect(ctx context.Context, client net.Conn, reader *bufio.Read
 	return nil
 }
 
-func readSOCKSRequest(client net.Conn, reader *bufio.Reader, handshakeTimeout time.Duration) (socksRequest, error) {
+func negotiateSOCKSRequest(client net.Conn, reader *bufio.Reader, handshakeTimeout time.Duration) (socksRequest, error) {
 	if handshakeTimeout > 0 {
 		setDeadlineQuietly(client, time.Now().Add(handshakeTimeout))
 	}
-	if err := socksHandshake(reader, client); err != nil {
+	if err := handshakeSOCKS(reader, client); err != nil {
 		return socksRequest{}, fmt.Errorf("SOCKS5 handshake: %w", err)
 	}
-	request, err := socksReadRequest(reader, client)
+	request, err := readSOCKSRequest(reader, client)
 	if err != nil {
 		return socksRequest{}, fmt.Errorf("SOCKS5 request: %w", err)
 	}
@@ -243,7 +226,7 @@ func readSOCKSRequest(client net.Conn, reader *bufio.Reader, handshakeTimeout ti
 }
 
 func uploadObserverFor(cfg Config, target socksRequest, tracker *connectionTracker) func([]byte) {
-	sniffer := x365.NewShadowsocksTargetSniffer(cfg.ShadowsocksSniffConfigs, target.Host, target.Port)
+	sniffer := sniff.NewShadowsocksTCPSniffer(cfg.ShadowsocksSniffConfigs, target.Host, target.Port)
 	if sniffer == nil {
 		return nil
 	}
@@ -252,7 +235,7 @@ func uploadObserverFor(cfg Config, target socksRequest, tracker *connectionTrack
 		if !ok {
 			return
 		}
-		nextTarget := x365.FormatTargetChain(target.Address, innerTarget)
+		nextTarget := formatTargetChain(target.address(), innerTarget)
 		tracker.updateTarget(nextTarget)
 	}
 }
@@ -278,14 +261,14 @@ func (cfg Config) emitConnection(event Event) {
 	cfg.OnConnection(event)
 }
 
-func (cfg Config) dialTCP(ctx context.Context, destHost string, destPort int) (io.ReadWriteCloser, error) {
+func (cfg Config) openTCP(ctx context.Context, destHost string, destPort int) (io.ReadWriteCloser, error) {
 	if cfg.Upstream == nil {
 		return nil, errors.New("proxy upstream is required")
 	}
 	return cfg.Upstream.OpenTCP(ctx, destHost, destPort)
 }
 
-func (cfg Config) dialUDP(ctx context.Context, destHost string, destPort int) (io.ReadWriteCloser, error) {
+func (cfg Config) openUDP(ctx context.Context, destHost string, destPort int) (datagram.Conn, error) {
 	if cfg.Upstream == nil {
 		return nil, errors.New("proxy upstream is required")
 	}
@@ -300,17 +283,10 @@ func (cfg Config) bindUDP(addr *net.UDPAddr) (udpPacketConn, error) {
 }
 
 func isBenignClientError(err error) bool {
-	switch {
-	case errors.Is(err, io.EOF):
-		return true
-	case errors.Is(err, io.ErrClosedPipe):
-		return true
-	case errors.Is(err, io.ErrUnexpectedEOF):
-		return true
-	case errors.Is(err, net.ErrClosed):
-		return true
-	}
-	if strings.Contains(err.Error(), "http2: response body closed") {
+	if errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, net.ErrClosed) {
 		return true
 	}
 	var netErr net.Error

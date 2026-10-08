@@ -14,9 +14,8 @@ import (
 	"github.com/rbee3u/efanadp/internal/x365"
 )
 
-// maxProxyTemplateBytes bounds the unpacked template. The packed field is
-// attacker-editable local text that startup decompresses before parsing, so a
-// small crafted payload would otherwise expand without limit.
+// Bound decompressed input before parsing to limit expansion from small
+// payloads.
 const maxProxyTemplateBytes = 4 << 20
 
 var errProxyTemplateTooLarge = fmt.Errorf("proxies_tmpl exceeds %d-byte unpacked limit", maxProxyTemplateBytes)
@@ -34,14 +33,18 @@ func proxyGroupsFromConfig(proxies yaml.MapSlice, encodedTemplate, uuid string) 
 func proxiesFromTemplate(encoded, uuid string) (yaml.MapSlice, error) {
 	encoded = strings.TrimSpace(encoded)
 	if encoded == "" {
-		return nil, errors.New("missing or empty proxies field")
+		return nil, configError(MissingProxies, errors.New("missing or empty proxies field"))
 	}
 	uuid = strings.TrimSpace(uuid)
 	if uuid == "" {
-		return nil, errors.New("missing proxies_uuid for proxies_tmpl")
+		return nil, configError(MissingUUID, errors.New("missing proxies_uuid for proxies_tmpl"))
 	}
 	if _, err := x365.ParseUserID(uuid); err != nil {
-		return nil, fmt.Errorf("invalid proxies_uuid: %w", err)
+		kind := InvalidUUID
+		if uuid == "<your-x365-uuid>" {
+			kind = UUIDPlaceholder
+		}
+		return nil, configError(kind, fmt.Errorf("invalid proxies_uuid: %w", err))
 	}
 
 	decoded, err := unpackProxyTemplate(encoded)
@@ -50,10 +53,10 @@ func proxiesFromTemplate(encoded, uuid string) (yaml.MapSlice, error) {
 	}
 	var tmpl yaml.MapSlice
 	if err := yaml.Unmarshal(decoded, &tmpl); err != nil {
-		return nil, fmt.Errorf("parse proxies_tmpl YAML: %s", safeYAMLError(err))
+		return nil, configError(TemplateYAML, fmt.Errorf("parse proxies_tmpl YAML: %s", safeYAMLError(err)))
 	}
 	if len(tmpl) == 0 {
-		return nil, errors.New("proxies_tmpl contains no proxy groups")
+		return nil, configError(TemplateEmpty, errors.New("proxies_tmpl contains no proxy groups"))
 	}
 	return mapProxyGroups(tmpl, func(value any) ([]string, error) {
 		return fillProxyTemplateURLs(value, uuid)
@@ -75,26 +78,23 @@ func packProxyTemplate(data []byte) (string, error) {
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
-// unpackProxyTemplate decodes the packed template, accepting the older
-// uncompressed base64 YAML form so a config.yaml copied from a pre-compression
-// reference file keeps loading. The size limit is applied first either way, so
-// the legacy path cannot be used to bypass it.
+// Accept legacy uncompressed base64 YAML within the same size limit.
 func unpackProxyTemplate(encoded string) ([]byte, error) {
 	decoded, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return nil, fmt.Errorf("decode proxies_tmpl: %w", err)
+		return nil, configError(TemplateBase64, fmt.Errorf("decode proxies_tmpl: %w", err))
 	}
 	unpacked, err := unzipProxyTemplate(decoded)
 	if err == nil {
 		return unpacked, nil
 	}
 	if errors.Is(err, errProxyTemplateTooLarge) || len(decoded) > maxProxyTemplateBytes {
-		return nil, fmt.Errorf("decompress proxies_tmpl: %w", errProxyTemplateTooLarge)
+		return nil, configError(TemplateTooLarge, fmt.Errorf("decompress proxies_tmpl: %w", errProxyTemplateTooLarge))
 	}
 	if isLegacyProxyTemplateYAML(decoded) {
 		return decoded, nil
 	}
-	return nil, fmt.Errorf("decompress proxies_tmpl: %w", err)
+	return nil, configError(TemplateCompression, fmt.Errorf("decompress proxies_tmpl: %w", err))
 }
 
 func unzipProxyTemplate(data []byte) ([]byte, error) {
@@ -137,34 +137,37 @@ func mapProxyGroups(
 }
 
 func parseProxyURLs(value any) ([]string, error) {
-	return collectProxyURLs(value, "x365 URLs", "empty proxy URL list", func(raw string) (string, error) {
+	return collectProxyURLs(value, ProxyListShape, func(raw string) (string, error) {
 		if !strings.HasPrefix(raw, "x365://") {
-			return "", errors.New("unsupported proxy URL")
+			return "", configError(UnsupportedURL, errors.New("unsupported proxy URL"))
 		}
 		return raw, nil
 	})
 }
 
 func fillProxyTemplateURLs(value any, uuid string) ([]string, error) {
-	return collectProxyURLs(
-		value,
-		"x365 URL templates",
-		"empty proxy URL template list",
-		func(raw string) (string, error) {
-			return fillProxyTemplateURL(raw, uuid)
-		},
-	)
+	return collectProxyURLs(value, TemplateListShape, func(raw string) (string, error) {
+		return fillProxyTemplateURL(raw, uuid)
+	})
 }
 
 func collectProxyURLs(
 	value any,
-	itemKind string,
-	emptyMessage string,
+	listKind ErrorKind,
 	normalize func(string) (string, error),
 ) ([]string, error) {
+	itemKind := "x365 URLs"
+	emptyMessage := "empty proxy URL list"
+	emptyKind := EmptyProxyList
+	if listKind == TemplateListShape {
+		itemKind = "x365 URL templates"
+		emptyMessage = "empty proxy URL template list"
+		emptyKind = EmptyTemplateList
+	}
+
 	items, ok := proxyURLStrings(value)
 	if !ok {
-		return nil, fmt.Errorf("expected a list of %s, got %T", itemKind, value)
+		return nil, configError(listKind, fmt.Errorf("expected a list of %s, got %T", itemKind, value))
 	}
 	urls := make([]string, 0, len(items))
 	for _, item := range items {
@@ -179,7 +182,7 @@ func collectProxyURLs(
 		urls = append(urls, url)
 	}
 	if len(urls) == 0 {
-		return nil, errors.New(emptyMessage)
+		return nil, configError(emptyKind, errors.New(emptyMessage))
 	}
 	return urls, nil
 }
@@ -205,11 +208,11 @@ func proxyURLStrings(value any) ([]string, bool) {
 
 func fillProxyTemplateURL(raw, uuid string) (string, error) {
 	if !strings.HasPrefix(raw, "x365://") {
-		return "", errors.New("unsupported proxy URL template")
+		return "", configError(UnsupportedTemplateURL, errors.New("unsupported proxy URL template"))
 	}
 	const emptyUserPrefix = "x365://@"
 	if strings.HasPrefix(raw, emptyUserPrefix) {
 		return "x365://" + uuid + raw[len("x365://"):], nil
 	}
-	return "", errors.New("x365 URL template must omit UUID as x365://@server")
+	return "", configError(TemplateUserInfo, errors.New("x365 URL template must omit UUID as x365://@server"))
 }

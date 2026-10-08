@@ -15,7 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rbee3u/efanadp/internal/x365"
+	"github.com/rbee3u/efanadp/internal/datagram"
+	"github.com/rbee3u/efanadp/internal/sniff"
 )
 
 func TestUDPAssociationCloseClosesTargetOnce(t *testing.T) {
@@ -23,8 +24,6 @@ func TestUDPAssociationCloseClosesTargetOnce(t *testing.T) {
 	assoc := newUDPAssociation(t.Context().Done(), Config{}, nil, &connectionTracker{stats: &Stats{}})
 	target := &udpTarget{
 		key:  "example.com:53",
-		host: "example.com",
-		port: 53,
 		conn: stream,
 		responseHeader: mustSOCKSUDPHeader(
 			t,
@@ -52,8 +51,6 @@ func TestUDPAssociationCloseClosesSocketAndUnblocksTargetRelay(t *testing.T) {
 	assoc.adoptClientAddr(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 53000})
 	target := &udpTarget{
 		key:            udpTargetKey("example.com", 53),
-		host:           "example.com",
-		port:           53,
 		conn:           stream,
 		responseHeader: mustSOCKSUDPHeader(t, "example.com", 53),
 	}
@@ -85,12 +82,10 @@ func TestUDPAssociationGetTargetClosesDuplicateOpen(t *testing.T) {
 	var assoc *udpAssociation
 	cfg := Config{
 		Upstream: testUpstream{
-			openUDP: func(_ context.Context, host string, port int) (io.ReadWriteCloser, error) {
+			openUDP: func(context.Context, string, int) (datagram.Conn, error) {
 				assoc.mu.Lock()
 				assoc.targets[key] = &udpTarget{
 					key:  key,
-					host: host,
-					port: port,
 					conn: existing,
 				}
 				assoc.mu.Unlock()
@@ -127,7 +122,7 @@ func TestUDPAssociationWriteFailureClosesTargetAndReopens(t *testing.T) {
 	opened := make(chan *writeFailingStream, 2)
 	cfg := Config{
 		Upstream: testUpstream{
-			openUDP: func(_ context.Context, host string, port int) (io.ReadWriteCloser, error) {
+			openUDP: func(_ context.Context, host string, port int) (datagram.Conn, error) {
 				if host != "example.com" || port != 53 {
 					return nil, fmt.Errorf("unexpected target %s", udpTargetKey(host, port))
 				}
@@ -172,17 +167,13 @@ func TestUDPAssociationWriteFailureClosesTargetAndReopens(t *testing.T) {
 	}, "second target close after write failure")
 }
 
-// Opening a destination dials TCP, completes a REALITY handshake, and writes the
-// X365 request. The client relay loop is the association's only reader, so an
-// open running on it delays every other destination behind a full handshake and
-// drops datagrams once the receive buffer fills.
 func TestUDPAssociationSlowTargetOpenDoesNotBlockOtherTargets(t *testing.T) {
 	release := make(chan struct{})
 	fast := newWriteRecordingStream()
 	slowDialing := make(chan struct{}, 1)
 	cfg := Config{
 		Upstream: testUpstream{
-			openUDP: func(_ context.Context, host string, _ int) (io.ReadWriteCloser, error) {
+			openUDP: func(_ context.Context, host string, _ int) (datagram.Conn, error) {
 				if host == "slow.example.net" {
 					slowDialing <- struct{}{}
 					<-release
@@ -214,7 +205,6 @@ func TestUDPAssociationSlowTargetOpenDoesNotBlockOtherTargets(t *testing.T) {
 		}
 	}
 
-	// A destination whose open never completes must not hold the relay loop.
 	forward("slow.example.net", "slow query")
 	receiveWithin(t, slowDialing, "slow target dial")
 
@@ -224,9 +214,6 @@ func TestUDPAssociationSlowTargetOpenDoesNotBlockOtherTargets(t *testing.T) {
 	}
 }
 
-// Only one open runs per destination. Without that guard every datagram arriving
-// during an open starts another dial for the same target, and all but one are
-// closed again as duplicates.
 func TestUDPAssociationOpensEachTargetOnceWhileOpening(t *testing.T) {
 	release := make(chan struct{})
 	var dials atomic.Int32
@@ -235,7 +222,7 @@ func TestUDPAssociationOpensEachTargetOnceWhileOpening(t *testing.T) {
 	cfg := Config{
 		Logger: logs.logger(),
 		Upstream: testUpstream{
-			openUDP: func(_ context.Context, _ string, _ int) (io.ReadWriteCloser, error) {
+			openUDP: func(_ context.Context, _ string, _ int) (datagram.Conn, error) {
 				if dials.Add(1) == 1 {
 					dialing <- struct{}{}
 				}
@@ -272,17 +259,11 @@ func TestUDPAssociationOpensEachTargetOnceWhileOpening(t *testing.T) {
 		t.Fatalf("dials=%d while one open is in flight, want 1", got)
 	}
 
-	// The five repeats fit the pending queue, so none of them is dropped as
-	// target-not-ready. TestUDPAssociationQueuesDatagramsWhileTargetOpens covers
-	// that they are also delivered in order once the open completes.
 	if got := logs.count("reason=target-not-ready"); got != 0 {
 		t.Fatalf("target-not-ready warnings=%d while queue has capacity, want 0", got)
 	}
 }
 
-// Datagrams arriving while an open is in flight queue onto it rather than being
-// dropped, so a stub resolver's A and AAAA queries sent together both reach the
-// destination on the first lookup.
 func TestUDPAssociationQueuesDatagramsWhileTargetOpens(t *testing.T) {
 	release := make(chan struct{})
 	dialing := make(chan struct{}, 1)
@@ -290,7 +271,7 @@ func TestUDPAssociationQueuesDatagramsWhileTargetOpens(t *testing.T) {
 	cfg := Config{
 		Logger: testLogger{},
 		Upstream: testUpstream{
-			openUDP: func(_ context.Context, _ string, _ int) (io.ReadWriteCloser, error) {
+			openUDP: func(_ context.Context, _ string, _ int) (datagram.Conn, error) {
 				dialing <- struct{}{}
 				<-release
 				return stream, nil
@@ -311,7 +292,6 @@ func TestUDPAssociationQueuesDatagramsWhileTargetOpens(t *testing.T) {
 		}
 	}
 
-	// Trigger an open and queue 7 more datagrams (8 total fits in the queue).
 	if err := assoc.forwardClientPacket(t.Context(), packet("first")); err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +303,6 @@ func TestUDPAssociationQueuesDatagramsWhileTargetOpens(t *testing.T) {
 		}
 	}
 
-	// Let the open complete and verify all queued datagrams were sent.
 	close(release)
 	var received []string
 	for i := 1; i <= 8; i++ {
@@ -337,10 +316,6 @@ func TestUDPAssociationQueuesDatagramsWhileTargetOpens(t *testing.T) {
 	}
 }
 
-// A cache miss starts a TCP dial and REALITY handshake in the background, so a
-// stream of unique destinations must not create an unbounded number of pending
-// handshakes before any of them finishes. Open targets count against the same
-// bound because each retains a stream, relay goroutine, and read buffer.
 func TestUDPAssociationBoundsDistinctTargets(t *testing.T) {
 	release := make(chan struct{})
 	var dials atomic.Int32
@@ -348,7 +323,7 @@ func TestUDPAssociationBoundsDistinctTargets(t *testing.T) {
 	cfg := Config{
 		Logger: logs.logger(),
 		Upstream: testUpstream{
-			openUDP: func(_ context.Context, _ string, _ int) (io.ReadWriteCloser, error) {
+			openUDP: func(_ context.Context, _ string, _ int) (datagram.Conn, error) {
 				dials.Add(1)
 				<-release
 				return newCloseCountingStream(), nil
@@ -390,11 +365,6 @@ func TestUDPAssociationBoundsDistinctTargets(t *testing.T) {
 	}
 }
 
-// Each drop reason is a standing policy, not a transient fault, so the condition
-// repeats for every datagram the client keeps sending. The datagram must be
-// dropped every time while the reason is named exactly once: logging each repeat
-// would write the drop rate into the log file, and rotation retains rather than
-// discards. A browser retrying QUIC is the realistic source.
 func TestUDPAssociationDropsBlockedDatagramsAndWarnsOncePerReason(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -481,9 +451,9 @@ func TestUDPAssociationDeduplicatesInnerTargetSniffUpdates(t *testing.T) {
 	tracker := newConnectionTracker(cfg, "udp", "127.0.0.1:50000", "example.com:53")
 	assoc := newUDPAssociation(t.Context().Done(), cfg, nil, tracker)
 
-	assoc.noteInnerTarget("example.com:53->inner.example:5353")
-	assoc.noteInnerTarget("example.com:53->inner.example:5353")
-	assoc.noteInnerTarget("example.com:53->other.example:5353")
+	assoc.noteInnerTarget("example.com:53", "inner.example:5353")
+	assoc.noteInnerTarget("example.com:53", "inner.example:5353")
+	assoc.noteInnerTarget("example.com:53", "other.example:5353")
 
 	first := receiveWithin(t, events, "first target update")
 	second := receiveWithin(t, events, "second target update")
@@ -500,45 +470,32 @@ func TestUDPAssociationDeduplicatesInnerTargetSniffUpdates(t *testing.T) {
 	}
 }
 
-// One association can carry many inner destinations through a single
-// Shadowsocks server. The label holds one at a time, so a client alternating
-// between peers flips it on nearly every datagram; the warning about that must
-// not repeat per flip, and the chain cap must bound the tracking map. The first
-// chain is reported but does not warn as oscillation because the label started
-// as the outer target, not another chain.
 func TestUDPAssociationWarnsOnceOnInnerTargetOscillation(t *testing.T) {
 	var logs logRecorder
 	cfg := Config{Logger: logs.logger()}
 	tracker := newConnectionTracker(cfg, "udp", "127.0.0.1:50000", "203.0.113.10:39281")
 	assoc := newUDPAssociation(t.Context().Done(), cfg, nil, tracker)
 
-	// Real flow: a destination opens, then datagrams sniff chains.
 	assoc.noteTargetOpened("203.0.113.10:39281")
 	for i := range 12 {
-		assoc.noteInnerTarget(fmt.Sprintf("203.0.113.10:39281->peer%d.example:5353", i))
+		assoc.noteInnerTarget("203.0.113.10:39281", fmt.Sprintf("peer%d.example:5353", i))
 	}
 
 	if got := logs.count("label oscillation"); got != 1 {
 		t.Fatalf("oscillation warnings=%d (%v), want exactly one", got, logs.all())
 	}
 
-	// Distinct chains beyond the cap stop being tracked, so the map cannot grow
-	// without bound behind a server relaying for many peers.
 	for i := range maxSniffedInnerTargets * 2 {
-		assoc.noteInnerTarget(fmt.Sprintf("203.0.113.10:39281->flood%d.example:5353", i))
+		assoc.noteInnerTarget("203.0.113.10:39281", fmt.Sprintf("flood%d.example:5353", i))
 	}
 	assoc.mu.Lock()
-	tracked := len(assoc.sniffedInnerTargets)
+	tracked := len(assoc.observation.innerTargets)
 	assoc.mu.Unlock()
 	if tracked > maxSniffedInnerTargets {
 		t.Fatalf("tracked inner targets=%d, want at most %d", tracked, maxSniffedInnerTargets)
 	}
 }
 
-// The label starts as the outer destination, so the first sniffed chain replaces
-// it as a matter of course. Only a move between two chains is oscillation, and
-// reporting the first discovery as one would warn on every association that
-// sniffs anything.
 func TestUDPAssociationDoesNotWarnOnFirstInnerTarget(t *testing.T) {
 	var logs logRecorder
 	cfg := Config{Logger: logs.logger()}
@@ -546,17 +503,13 @@ func TestUDPAssociationDoesNotWarnOnFirstInnerTarget(t *testing.T) {
 	assoc := newUDPAssociation(t.Context().Done(), cfg, nil, tracker)
 
 	assoc.noteTargetOpened("203.0.113.10:39281")
-	assoc.noteInnerTarget("203.0.113.10:39281->a.example:5353")
+	assoc.noteInnerTarget("203.0.113.10:39281", "a.example:5353")
 
 	if got := logs.count("label oscillation"); got != 0 {
 		t.Fatalf("warned on first inner target: %v", logs.all())
 	}
 }
 
-// An association pins the first source it sees. When several local sources send
-// their first datagram at once, exactly one must win and the pinned address must
-// be that winner's: a partial adoption would leave responses addressed to a
-// source that was never accepted.
 func TestUDPAssociationAdoptClientAddrPinsOneWinnerUnderRace(t *testing.T) {
 	const sources = 10
 	assoc := newUDPAssociation(t.Context().Done(), Config{}, nil, &connectionTracker{stats: &Stats{}})
@@ -591,9 +544,6 @@ func TestUDPAssociationAdoptClientAddrPinsOneWinnerUnderRace(t *testing.T) {
 	}
 }
 
-// UDP_ASSOCIATE belongs to the peer that owns its TCP control connection. A
-// datagram from another IP must not be allowed to win the first-source race, and
-// a non-zero source port declared in the request narrows the endpoint further.
 func TestUDPAssociationRejectsUnexpectedClientBeforePinning(t *testing.T) {
 	var logs logRecorder
 	assoc := newUDPAssociation(
@@ -680,7 +630,7 @@ func TestUDPAssociationPinsClientAndDropsForeignSources(t *testing.T) {
 	cfg := Config{
 		Logger: logs.logger(),
 		Upstream: testUpstream{
-			openUDP: func(_ context.Context, host string, port int) (io.ReadWriteCloser, error) {
+			openUDP: func(_ context.Context, host string, port int) (datagram.Conn, error) {
 				opens <- udpTargetKey(host, port)
 				return newCloseCountingStream(), nil
 			},
@@ -704,9 +654,6 @@ func TestUDPAssociationPinsClientAndDropsForeignSources(t *testing.T) {
 		return err == nil && target != nil
 	}, "client target registration")
 
-	// A second local process must not be relayed, and must not steal responses.
-	// Being foreign is a standing condition, so a client that keeps sending is
-	// dropped every time but named in the log only once.
 	for range 5 {
 		if err := assoc.forwardClientPacket(t.Context(), udpClientPacket{addr: foreign, datagram: datagram}); err != nil {
 			t.Fatal(err)
@@ -721,35 +668,27 @@ func TestUDPAssociationPinsClientAndDropsForeignSources(t *testing.T) {
 		t.Fatalf("foreign-source drop logs=%d (%v), want exactly one", got, logs.all())
 	}
 
-	// Repeat datagrams from the pinned client keep flowing on the cached target.
 	if err := assoc.forwardClientPacket(t.Context(), udpClientPacket{addr: client, datagram: datagram}); err != nil {
 		t.Fatal(err)
 	}
 	requireNoReceive(t, opens, "reopen for pinned client")
 }
 
-// The Shadowsocks UDP sniffer is derived once per target instead of once per
-// datagram, so a target opened for a configured server must carry one and a
-// target opened for anything else must not. Sniff correctness itself is covered
-// in internal/x365.
 func TestUDPTargetCarriesShadowsocksSnifferForConfiguredServer(t *testing.T) {
 	const (
 		ssHost = "203.0.113.10"
 		ssPort = 39281
 	)
-	sniffConfigs, err := x365.NormalizeShadowsocksSniffConfigs([]x365.ShadowsocksSniffConfig{{
+	sniffConfigs := []sniff.ShadowsocksConfig{{
 		Server:   ssHost,
 		Port:     ssPort,
 		Method:   "aes-256-gcm",
 		Password: "secret",
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	}}
 	cfg := Config{
 		ShadowsocksSniffConfigs: sniffConfigs,
 		Upstream: testUpstream{
-			openUDP: func(_ context.Context, _ string, _ int) (io.ReadWriteCloser, error) {
+			openUDP: func(_ context.Context, _ string, _ int) (datagram.Conn, error) {
 				return newCloseCountingStream(), nil
 			},
 		},
@@ -787,9 +726,9 @@ func TestUDPAssociationSweepClosesIdleTargets(t *testing.T) {
 	fresh := newCloseCountingStream()
 	now := time.Now()
 
-	idleTarget := &udpTarget{key: "idle:53", host: "idle", port: 53, conn: idle}
+	idleTarget := &udpTarget{key: "idle:53", conn: idle}
 	idleTarget.touch(now.Add(-5 * time.Minute))
-	freshTarget := &udpTarget{key: "fresh:53", host: "fresh", port: 53, conn: fresh}
+	freshTarget := &udpTarget{key: "fresh:53", conn: fresh}
 	freshTarget.touch(now)
 	assoc.targets[idleTarget.key] = idleTarget
 	assoc.targets[freshTarget.key] = freshTarget
@@ -811,17 +750,13 @@ func TestUDPAssociationSweepClosesIdleTargets(t *testing.T) {
 	}
 }
 
-// A cached target must be marked active while the association lock is held, or
-// the sweep can close it between the cache lookup and the write, which silently
-// drops the datagram that reused it. Steady DNS traffic makes this the common
-// case for a long-lived resolver target.
 func TestUDPAssociationLookupKeepsTargetFromIdleSweep(t *testing.T) {
 	assoc := newUDPAssociation(t.Context().Done(), Config{}, nil, &connectionTracker{stats: &Stats{}})
 	defer assoc.close()
 
 	stream := newCloseCountingStream()
 	key := udpTargetKey("resolver.example.net", 53)
-	target := &udpTarget{key: key, host: "resolver.example.net", port: 53, conn: stream}
+	target := &udpTarget{key: key, conn: stream}
 	stale := time.Now().Add(-5 * time.Minute)
 	target.touch(stale)
 	assoc.targets[key] = target
@@ -842,8 +777,6 @@ func TestUDPAssociationLookupKeepsTargetFromIdleSweep(t *testing.T) {
 	}
 }
 
-// openUDP defers its X365 response read to the first target read, so a rejected
-// upstream only surfaces here. Without a log the client just sees no reply.
 func TestUDPAssociationLogsTargetReadFailure(t *testing.T) {
 	var logs logRecorder
 	readErr := errors.New("bad X365 response: deadbeef")
@@ -851,8 +784,6 @@ func TestUDPAssociationLogsTargetReadFailure(t *testing.T) {
 	assoc := newUDPAssociation(t.Context().Done(), cfg, nil, &connectionTracker{stats: &Stats{}})
 	target := &udpTarget{
 		key:            udpTargetKey("example.org", 53),
-		host:           "example.org",
-		port:           53,
 		conn:           &readFailingStream{err: readErr},
 		responseHeader: mustSOCKSUDPHeader(t, "example.org", 53),
 	}
@@ -871,8 +802,6 @@ func TestUDPAssociationLogsTargetReadFailure(t *testing.T) {
 	}
 }
 
-// Close, context teardown, and the idle sweep are all normal, so they must not
-// log an upstream failure.
 func TestUDPAssociationDoesNotLogBenignTargetReadErrors(t *testing.T) {
 	var logs logRecorder
 	cfg := Config{Logger: logs.logger()}
@@ -880,8 +809,6 @@ func TestUDPAssociationDoesNotLogBenignTargetReadErrors(t *testing.T) {
 	for _, err := range []error{net.ErrClosed, io.EOF} {
 		target := &udpTarget{
 			key:            udpTargetKey("example.net", 5353),
-			host:           "example.net",
-			port:           5353,
 			conn:           &readFailingStream{err: err},
 			responseHeader: mustSOCKSUDPHeader(t, "example.net", 5353),
 		}
@@ -897,8 +824,8 @@ type readFailingStream struct {
 	err error
 }
 
-func (s *readFailingStream) Read([]byte) (int, error) { return 0, s.err }
-func (s *readFailingStream) Write(p []byte) (int, error) {
+func (s *readFailingStream) ReadDatagram([]byte) (int, error) { return 0, s.err }
+func (s *readFailingStream) WriteDatagram(p []byte) (int, error) {
 	return len(p), nil
 }
 func (s *readFailingStream) Close() error { return nil }
@@ -915,12 +842,6 @@ func TestUDPAssociationSweepStopsWithContext(t *testing.T) {
 	receiveWithin(t, done, "idle sweeper shutdown")
 }
 
-// The association socket is shared by every destination, so a send failure that
-// belongs to one datagram must not end the destination that produced it. A
-// maximum-size upstream response does exactly that: the SOCKS header pushes it
-// past the 65507-byte datagram limit and sendto reports EMSGSIZE. Detaching
-// would throw away a working stream and make the next datagram redo the dial and
-// REALITY handshake.
 func TestUDPAssociationKeepsTargetWhenClientWriteFails(t *testing.T) {
 	var logs logRecorder
 	udpConn := &writeFailingUDPPacketConn{
@@ -931,12 +852,9 @@ func TestUDPAssociationKeepsTargetWhenClientWriteFails(t *testing.T) {
 	assoc := newUDPAssociation(t.Context().Done(), cfg, udpConn, &connectionTracker{stats: &Stats{}})
 	assoc.clientAddr.Store(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53000})
 
-	// Two readable datagrams, then EOF, so the relay returns on its own if it
-	// keeps going past the failed sends.
+	// EOF ends the relay after both failed sends, avoiding a blocking fixture.
 	target := &udpTarget{
 		key:            udpTargetKey("example.org", 53),
-		host:           "example.org",
-		port:           53,
 		conn:           &readSequenceStream{payloads: [][]byte{[]byte("one"), []byte("two")}},
 		responseHeader: mustSOCKSUDPHeader(t, "example.org", 53),
 	}
@@ -953,15 +871,11 @@ func TestUDPAssociationKeepsTargetWhenClientWriteFails(t *testing.T) {
 	if got := logs.count("reason=" + dropReasonClientWrite); got != 1 {
 		t.Fatalf("client-write warnings=%d (%v), want exactly one", got, logs.all())
 	}
-	// The relay ends on the upstream EOF, not on the send failures, and only then
-	// detaches the destination.
 	if _, ok := assoc.targets[target.key]; ok {
 		t.Fatal("target still cached after the upstream ended")
 	}
 }
 
-// writeFailingUDPPacketConn fails every send with a fixed error and counts the
-// attempts.
 type writeFailingUDPPacketConn struct {
 	local    *net.UDPAddr
 	err      error
@@ -981,12 +895,11 @@ func (c *writeFailingUDPPacketConn) WriteToUDP([]byte, *net.UDPAddr) (int, error
 
 func (c *writeFailingUDPPacketConn) Close() error { return nil }
 
-// readSequenceStream returns each payload as one Read, then EOF.
 type readSequenceStream struct {
 	payloads [][]byte
 }
 
-func (s *readSequenceStream) Read(p []byte) (int, error) {
+func (s *readSequenceStream) ReadDatagram(p []byte) (int, error) {
 	if len(s.payloads) == 0 {
 		return 0, io.EOF
 	}
@@ -995,8 +908,8 @@ func (s *readSequenceStream) Read(p []byte) (int, error) {
 	return copy(p, payload), nil
 }
 
-func (s *readSequenceStream) Write(p []byte) (int, error) { return len(p), nil }
-func (s *readSequenceStream) Close() error                { return nil }
+func (s *readSequenceStream) WriteDatagram(p []byte) (int, error) { return len(p), nil }
+func (s *readSequenceStream) Close() error                        { return nil }
 
 func mustSOCKSUDPHeader(tb testing.TB, host string, port int) []byte {
 	tb.Helper()
@@ -1063,12 +976,12 @@ func newCloseCountingStream() *closeCountingStream {
 	return &closeCountingStream{closed: make(chan struct{})}
 }
 
-func (s *closeCountingStream) Read([]byte) (int, error) {
+func (s *closeCountingStream) ReadDatagram([]byte) (int, error) {
 	<-s.closed
 	return 0, net.ErrClosed
 }
 
-func (s *closeCountingStream) Write(p []byte) (int, error) {
+func (s *closeCountingStream) WriteDatagram(p []byte) (int, error) {
 	return len(p), nil
 }
 
@@ -1079,8 +992,6 @@ func (s *closeCountingStream) Close() error {
 	return nil
 }
 
-// writeRecordingStream reports each payload written to it, so a test can observe
-// a datagram reaching its destination.
 type writeRecordingStream struct {
 	*closeCountingStream
 	writes chan []byte
@@ -1093,7 +1004,7 @@ func newWriteRecordingStream() *writeRecordingStream {
 	}
 }
 
-func (s *writeRecordingStream) Write(p []byte) (int, error) {
+func (s *writeRecordingStream) WriteDatagram(p []byte) (int, error) {
 	select {
 	case s.writes <- bytes.Clone(p):
 	default:
@@ -1113,7 +1024,7 @@ func newWriteFailingStream(err error) *writeFailingStream {
 	}
 }
 
-func (s *writeFailingStream) Write([]byte) (int, error) {
+func (s *writeFailingStream) WriteDatagram([]byte) (int, error) {
 	return 0, s.err
 }
 
@@ -1131,7 +1042,7 @@ func newOnePacketStream(payload []byte) *onePacketStream {
 	}
 }
 
-func (s *onePacketStream) Read(p []byte) (int, error) {
+func (s *onePacketStream) ReadDatagram(p []byte) (int, error) {
 	if !s.sent.Swap(true) {
 		return copy(p, s.payload), nil
 	}
@@ -1139,7 +1050,7 @@ func (s *onePacketStream) Read(p []byte) (int, error) {
 	return 0, net.ErrClosed
 }
 
-func (s *onePacketStream) Write(p []byte) (int, error) {
+func (s *onePacketStream) WriteDatagram(p []byte) (int, error) {
 	return len(p), nil
 }
 

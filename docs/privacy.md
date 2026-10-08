@@ -1,87 +1,35 @@
 # Privacy and Sanitization
 
-This project handles private-networking runtime material. Use this checklist
-before writing docs, tests, issues, commits, or review notes.
+`config.yaml`, `settings.json`, private node URLs, account UUIDs, REALITY keys
+and short IDs, provider domains, captures, and live logs are private. Never
+commit, quote, or derive examples from them. Open private config only for
+explicitly requested runtime debugging.
 
-## Before Sharing or Committing
+## Examples and Reports
 
-- Check the diff for private configs, node URLs, UUIDs, keys, provider domains,
-  captures, and live logs.
-- Write examples from placeholders; do not partially redact private values.
-- Summarize live failures by command, TUI status, and redacted error class
-  instead of pasting raw config or log lines.
-- Decode, decompress, or expand `proxies_tmpl` only for explicit template
-  maintenance or audit work, and never quote decoded private material.
+Start examples from placeholders: `example.org`, `example.net`, `203.0.113.10`,
+`<your-x365-uuid>`, `<public-key>`, `<short-id>`, and `<shadowsocks-password>`.
+Partial redaction of a private value is insufficient.
 
-## Private Material
+Before sharing, inspect the diff for private material. Report failures by
+command or UI action, status, and redacted error class. Settings contain local
+paths and node names; logs can expose client addresses, targets, and sniffed
+inner hosts. Keep both untracked.
 
-Treat these as private:
+Config and template YAML errors omit source excerpts while preserving parser
+reason and position. Preserve this boundary to avoid exposing node material.
 
-- `config.yaml`
-- `settings.json`
-- private node URLs
-- account UUIDs
-- REALITY keys and short IDs
-- captures, provider domains, and live logs
+## Config Template
 
-Do not commit, quote, or derive examples from them. Do not open private config
-unless the user explicitly asks for runtime debugging. When reporting runtime
-failures, summarize the symptom and redact the material.
+`config.reference.yaml` is the committed reference. Regenerate only for
+config-shape changes or explicit template maintenance, using the
+[reference command](configuration.md#committed-template-format).
 
-Config and packed-template YAML errors report the parser reason and line/column
-position without echoing the source line. Keep that boundary intact: parser
-source excerpts can contain UUIDs, provider hosts, paths, or REALITY material.
+`proxies_tmpl` is zlib-compressed base64, which is packaging, not redaction.
+The generator removes X365 UUID userinfo only; hosts, paths, keys, short IDs,
+and other provider material can remain. Decode, decompress, expand, or quote
+it only for an explicit template audit or regeneration task. Inspect generated
+output before committing and report only sanitized findings.
 
-## Safe Examples
-
-Use only sanitized placeholders in committed text:
-
-- `example.org` for adapter-bound traffic examples
-- `example.net` for node-server domain examples
-- `203.0.113.10` for documentation-only IPv4 examples
-- `<your-x365-uuid>`, `<public-key>`, `<short-id>`, and
-  `<shadowsocks-password>` for secrets or node material
-
-Do not copy hostnames, paths, UUIDs, public keys, or log lines from a private
-node and then "partially redact" them. Start from placeholders instead.
-
-## Config Template Safety
-
-`config.reference.yaml` is the committed template. Regenerate it with
-`make config-reference` only when the config shape changes or when explicitly
-maintaining the template.
-
-The `proxies_tmpl` field is zlib-compressed, base64-encoded packaging, not
-redaction. The generator strips X365 UUID userinfo only; unpacked templates can
-still represent node hosts, paths, public keys, short IDs, or other
-provider-specific values after decoding and decompression. Do not decode,
-decompress, expand, or quote it during routine documentation or issue triage.
-When template maintenance is required, inspect the generated diff for sanitized
-output before committing.
-
-The generator writes through a same-directory temporary file, forces mode
-`0600`, and atomically replaces the destination. This prevents a failed write
-from leaving a partial template and tightens an existing output file that had
-broader permissions. It refuses an output path that resolves to the private
-input file, so a mistaken `--out` cannot replace the source configuration.
-
-## Logs and Reports
-
-`settings.json` can contain local config paths and remembered node names. Logs
-can contain local client addresses, targets, and sniffed inner hosts. Keep
-`settings.json` and `logs/` out of git and do not paste live logs into docs or
-comments.
-
-Useful reports describe:
-
-- the command or UI action
-- the visible TUI status
-- the redacted error class or symptom
-- whether mihomo, browser DNS/DoH, UDP/443, or fake-IP behavior is involved
-
-## Protocol Findings
-
-Protocol changes need fresh reverse evidence. In particular, do not loosen
-UDP/443 or QUIC behavior unless a new APK finding proves X365 forwards QUIC
-through the UDP path. Document such findings in
-[`x365-protocol.md`](x365-protocol.md).
+The command atomically replaces its output with mode `0600` after a complete
+write and refuses an output that resolves to its private input file.

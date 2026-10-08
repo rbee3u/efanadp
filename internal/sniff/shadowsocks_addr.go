@@ -1,21 +1,10 @@
-package x365
+package sniff
 
 import (
 	"encoding/binary"
-	"fmt"
 	"net"
 	"strconv"
-	"strings"
 )
-
-func sameHost(left, right string) bool {
-	leftIP := net.ParseIP(left)
-	rightIP := net.ParseIP(right)
-	if leftIP != nil || rightIP != nil {
-		return leftIP != nil && rightIP != nil && leftIP.Equal(rightIP)
-	}
-	return strings.EqualFold(left, right)
-}
 
 func parseShadowsocksTargetAddress(payload []byte) (string, bool) {
 	if len(payload) < 1 {
@@ -54,12 +43,4 @@ func parseShadowsocksTargetAddress(payload []byte) (string, bool) {
 		return "", false
 	}
 	return net.JoinHostPort(host, strconv.Itoa(int(port))), true
-}
-
-// FormatTargetChain builds a display-only outer->inner target label.
-func FormatTargetChain(outer, inner string) string {
-	if inner == "" || inner == outer {
-		return outer
-	}
-	return fmt.Sprintf("%s->%s", outer, inner)
 }

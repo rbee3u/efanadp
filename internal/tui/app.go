@@ -2,145 +2,81 @@ package tui
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
-	"time"
-
-	"github.com/rbee3u/efanadp/internal/config"
-	"github.com/rbee3u/efanadp/internal/proxy"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/rbee3u/efanadp/internal/session"
+	"github.com/rbee3u/efanadp/internal/x365"
 )
 
-// Options supplies startup paths and network timeouts for Run.
+// Logger receives interface status messages; app owns its output resources.
+type Logger interface {
+	Infof(format string, args ...any)
+	Warnf(format string, args ...any)
+	Errorf(format string, args ...any)
+}
+
+type noopLogger struct{}
+
+func (noopLogger) Infof(string, ...any)  {}
+func (noopLogger) Warnf(string, ...any)  {}
+func (noopLogger) Errorf(string, ...any) {}
+
+// Options supplies prepared startup data and the capabilities needed by the UI.
+// Prepare validates a selection before the current service is stopped;
+// SaveSelection runs on TUI entry and before each service starts.
 type Options struct {
-	// ConfigPath overrides settings.json and the default config.yaml when set.
-	ConfigPath string
-
-	// Timeout bounds X365 transport opening. Non-positive values disable it.
-	Timeout time.Duration
-
-	// HandshakeTimeout bounds the local SOCKS greeting and request. Non-positive
-	// values disable it.
-	HandshakeTimeout time.Duration
+	ConfigPath     string
+	Listen         string
+	Nodes          []x365.Node
+	RememberedNode string
+	SettingsError  error
+	Logger         Logger
+	Prepare        func(x365.Node) (session.StartFunc, error)
+	SaveSelection  func(string) error
 }
 
-type modelDeps struct {
-	logger     appLog
-	serveSOCKS serveSOCKSFunc
-}
-
-type startupConfig struct {
-	runtime     runtimeConfig
-	settings    appSettings
-	settingsErr error
-}
-
-// Run loads one configuration snapshot and owns the terminal until the Bubble
-// Tea program exits. Configuration changes require a new call to Run.
+// Run owns the terminal. Normal and failed terminal exits stop and await the
+// service before process resources close. A second quit explicitly skips waiting.
 func Run(opts Options) error {
-	startup, err := prepareStartup(opts)
-	if err != nil {
+	return run(opts, func(model *Model) error {
+		_, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
 		return err
+	})
+}
+
+func run(opts Options, runProgram func(*Model) error) error {
+	if opts.Prepare == nil {
+		return fmt.Errorf("missing service preparation")
 	}
-	logSink, err := newAppLogger(startup.runtime.loaded.Log)
-	if err != nil {
-		return err
-	}
+	model := newModel(opts)
 	defer func() {
-		_ = logSink.Close()
+		model.cancelService()
+		if model.service != nil && !model.forceQuit {
+			<-model.service.backend.Done()
+		}
 	}()
-	model := newModel(startup, modelDeps{logger: logSink})
-	model.saveSettingsLogged()
-	_, err = tea.NewProgram(model, tea.WithAltScreen()).Run()
-	return err
+	model.saveSelection()
+	return runProgram(model)
 }
 
-func prepareStartup(opts Options) (startupConfig, error) {
-	runtime := newRuntimeConfig(opts)
-	settings, settingsErr := loadSettings(runtime.settingsPath)
-	runtime.configPath = resolveConfigPath(runtime.configPath, settings)
-
-	loaded, err := config.Load(runtime.configPath)
-	if err != nil {
-		return startupConfig{}, fmt.Errorf("load config: %s", userConfigLoadError(runtime.configPath, err))
+func newModel(opts Options) *Model {
+	if opts.Logger == nil {
+		opts.Logger = noopLogger{}
 	}
-	if err := validateLogOutputPath(loaded.Log.Output, runtime.configPath, runtime.settingsPath); err != nil {
-		return startupConfig{}, fmt.Errorf("load config: %w", err)
-	}
-	runtime.loaded = loaded
-	return startupConfig{
-		runtime:     runtime,
-		settings:    settings,
-		settingsErr: settingsErr,
-	}, nil
-}
-
-// validateLogOutputPath rejects a log file that is really the config or settings
-// file. Nothing else protects them: the logger opens its output for append, so a
-// config path would have log lines written over private input the app only ever
-// reads and cannot regenerate, and a settings path would race saveSettings,
-// whose temp-file rename and the logger's appends each corrupt the other.
-func validateLogOutputPath(output, configPath, settingsPath string) error {
-	switch strings.ToLower(strings.TrimSpace(output)) {
-	case "stdout", "stderr":
-		return nil
-	}
-	if pathsReferToSameFile(output, configPath) {
-		return fmt.Errorf("log.output resolves to the config file")
-	}
-	if pathsReferToSameFile(output, settingsPath) {
-		return fmt.Errorf("log.output resolves to the settings file")
-	}
-	return nil
-}
-
-func pathsReferToSameFile(left, right string) bool {
-	leftAbs, leftErr := filepath.Abs(left)
-	rightAbs, rightErr := filepath.Abs(right)
-	if leftErr == nil && rightErr == nil && leftAbs == rightAbs {
-		return true
-	}
-	leftInfo, leftErr := os.Stat(left)
-	rightInfo, rightErr := os.Stat(right)
-	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
-}
-
-func resolveConfigPath(explicitPath string, settings appSettings) string {
-	if path := strings.TrimSpace(explicitPath); path != "" {
-		return path
-	}
-	if path := strings.TrimSpace(settings.ConfigPath); path != "" {
-		return path
-	}
-	return defaultConfigPath
-}
-
-func newModel(startup startupConfig, deps modelDeps) *Model {
-	runtime := startup.runtime
-	if deps.logger == nil {
-		deps.logger = noopLogger{}
-	}
-	if deps.serveSOCKS == nil {
-		deps.serveSOCKS = proxy.ServeSOCKS
-	}
-
-	nodes := nodesForDisplay(startup.runtime.loaded.Nodes)
-
+	nodes := nodesForDisplay(opts.Nodes)
 	model := &Model{
-		config:   runtime,
-		deps:     deps,
+		options:  opts,
 		state:    stateNodeList,
-		nodeList: newNodeList(nodeItemsWithCurrent(nodes, "")),
+		nodeList: newNodeList(nodes, ""),
 		nodes:    nodes,
 	}
-	if startup.settingsErr != nil {
-		deps.logger.Warnf("[efanadp] load settings failed path=%s err=%v", runtime.settingsPath, startup.settingsErr)
-		model.setStatus(statusWarning, "Failed to read settings; using "+runtime.configPath+": "+shortError(startup.settingsErr))
+	if opts.SettingsError != nil {
+		model.setStatus(statusWarning, "Failed to read settings; using "+opts.ConfigPath+": "+shortError(opts.SettingsError))
 		return model
 	}
-	if remembered := strings.TrimSpace(startup.settings.NodeName); remembered != "" {
+	if remembered := strings.TrimSpace(opts.RememberedNode); remembered != "" {
 		model.rememberedNodeName = remembered
 		if node, ok := model.selectNodeByName(remembered); ok {
 			model.setStatus(statusSuccess, "Restored previous node: "+node.Name)
@@ -151,4 +87,15 @@ func newModel(startup startupConfig, deps modelDeps) *Model {
 		}
 	}
 	return model
+}
+
+func (m *Model) saveSelection() {
+	if m.options.SaveSelection == nil {
+		return
+	}
+	if err := m.options.SaveSelection(m.rememberedNodeName); err != nil {
+		if m.canShowSettingsWarning() {
+			m.setStatus(statusWarning, "Failed to save settings; next launch may not restore automatically: "+shortError(err))
+		}
+	}
 }

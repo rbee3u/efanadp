@@ -11,13 +11,6 @@ func closeQuietly(closer io.Closer) {
 	_ = closer.Close()
 }
 
-func closePipeReaderWithError(reader *io.PipeReader, err error) {
-	if reader == nil {
-		return
-	}
-	_ = reader.CloseWithError(err)
-}
-
 func writeFull(w io.Writer, p []byte) error {
 	for len(p) > 0 {
 		n, err := w.Write(p)
@@ -28,6 +21,18 @@ func writeFull(w io.Writer, p []byte) error {
 			return io.ErrShortWrite
 		}
 		p = p[n:]
+	}
+	return nil
+}
+
+func discardFull(r io.Reader, n int) error {
+	var buf [512]byte
+	for n > 0 {
+		chunk := min(n, len(buf))
+		if _, err := io.ReadFull(r, buf[:chunk]); err != nil {
+			return err
+		}
+		n -= chunk
 	}
 	return nil
 }

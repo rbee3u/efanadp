@@ -1,23 +1,15 @@
 package x365
 
-import "sync"
+import (
+	"io"
+	"sync"
+)
 
-// ackQueue holds the newest multipath ACK a reader has produced but not yet
-// written, so acknowledging an inbound data frame never has to wait for the
-// frame write lock.
-//
-// Waiting there wedges the connection. A data frame write parks in the upstream
-// flow-control window for as long as the destination is slow to drain, and it
-// holds the write lock for that whole time. An ACK issued from Read would queue
-// behind it, so Read would stop draining the response body; the server would
-// then stop being able to send, which is what it needs to do before it can drain
-// the upload the write is waiting on. Neither direction can move again.
-//
-// Multipath ACKs are cumulative, so coalescing loses nothing: only the newest
-// sequence carries information, and one slot is enough to hold it.
+// ackQueue coalesces cumulative ACKs without waiting for the frame write lock.
+// Waiting behind a flow-controlled upload would stop Read from draining
+// downloads and can deadlock both directions.
 type ackQueue struct {
-	// signal is a coalescing wakeup with capacity one. It tells the sender that
-	// a sequence is waiting, never which one.
+	// signal is a coalesced wakeup; seq holds the acknowledgement.
 	signal chan struct{}
 	quit   chan struct{}
 	done   chan struct{}
@@ -37,11 +29,8 @@ func newACKQueue() *ackQueue {
 	}
 }
 
-// offer records seq as the sequence to acknowledge next. It never blocks.
 func (q *ackQueue) offer(seq uint64) {
 	q.mu.Lock()
-	// Sequences only ever advance, so keeping the larger value means a slow
-	// offer can never rewind an acknowledgement that already went out.
 	if !q.pending || seq > q.seq {
 		q.seq = seq
 		q.pending = true
@@ -49,7 +38,6 @@ func (q *ackQueue) offer(seq uint64) {
 	q.mu.Unlock()
 }
 
-// take removes the queued sequence, reporting false when nothing is waiting.
 func (q *ackQueue) take() (uint64, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -58,7 +46,6 @@ func (q *ackQueue) take() (uint64, bool) {
 	return seq, pending
 }
 
-// wake asks the sender goroutine to write whatever is queued.
 func (q *ackQueue) wake() {
 	select {
 	case q.signal <- struct{}{}:
@@ -66,9 +53,8 @@ func (q *ackQueue) wake() {
 	}
 }
 
-// stop ends the sender goroutine and waits for it to return. Callers close the
-// stream first, so a send already parked on the write lock fails and unwinds
-// instead of holding stop open.
+// Close the stream before stop so a blocked writer releases the sender
+// goroutine.
 func (q *ackQueue) stop() {
 	q.quitOnce.Do(func() {
 		close(q.quit)
@@ -76,8 +62,7 @@ func (q *ackQueue) stop() {
 	<-q.done
 }
 
-// run writes queued ACKs until the queue is stopped or the stream fails. flush
-// is called with the frame write lock held by run.
+// flush acquires the frame write lock; a failed write ends the sender.
 func (q *ackQueue) run(flush func() error) {
 	defer close(q.done)
 	for {
@@ -87,8 +72,44 @@ func (q *ackQueue) run(flush func() error) {
 			return
 		}
 		if err := flush(); err != nil {
-			// The stream is gone, so no later ACK can be written either.
 			return
 		}
 	}
+}
+
+func (c *multipathConn) ackDataFrame(seq uint64) {
+	c.acks.offer(seq)
+	if !c.writeMu.TryLock() {
+		c.acks.wake()
+		return
+	}
+	// The next relay read/write reports failure; failed ACKs cannot be retried.
+	_ = c.flushACKLocked()
+	c.writeMu.Unlock()
+}
+
+func (c *multipathConn) flushACK() error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.flushACKLocked()
+}
+
+// Taking and writing under one lock prevents flushers from reordering ACKs.
+func (c *multipathConn) flushACKLocked() error {
+	if c.closed.Load() {
+		return io.ErrClosedPipe
+	}
+	if c.writeErr != nil {
+		return c.writeErr
+	}
+	seq, ok := c.acks.take()
+	if !ok {
+		return nil
+	}
+	ack := ackFrameHeader(seq)
+	if err := writeFull(c.stream, ack[:]); err != nil {
+		c.writeErr = err
+		return err
+	}
+	return nil
 }

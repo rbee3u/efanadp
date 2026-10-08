@@ -12,45 +12,10 @@ import (
 func (m *Model) runningStatus() string {
 	return fmt.Sprintf(
 		"Running · Active: %d · Closed: %d · URL: %s",
-		m.connections.activeCount(),
+		len(m.connections.active),
 		m.connections.closed,
-		localSOCKS5Link(m.runningListen()),
+		localSOCKS5Link(m.options.Listen),
 	)
-}
-
-func (m *Model) runningListen() string {
-	if m.service != nil && m.service.listen != "" {
-		return m.service.listen
-	}
-	return m.config.loaded.Listen
-}
-
-func (m *Model) runningSummary() string {
-	if m.service == nil {
-		return "Not running"
-	}
-	var b strings.Builder
-	b.WriteString(m.runningStatus())
-	if node := m.currentNode(); node != nil {
-		b.WriteString("\n\n")
-		b.WriteString(node.Name)
-		b.WriteString("\n")
-		b.WriteString(node.ServerSummary())
-	}
-	return b.String()
-}
-
-func (m *Model) compactRunningSummary() string {
-	if m.service == nil {
-		return m.runningSummary()
-	}
-	var b strings.Builder
-	b.WriteString(m.runningStatus())
-	if node := m.currentNode(); node != nil {
-		b.WriteString("\n\n")
-		b.WriteString(node.Name)
-	}
-	return b.String()
 }
 
 func localSOCKS5Link(listen string) string {
@@ -74,36 +39,22 @@ func localSOCKS5LinkHost(listen string) string {
 	return net.JoinHostPort(host, port)
 }
 
-func (m *Model) transientStatus() string {
-	if m.status == "" {
-		return ""
-	}
-	return renderStatus(m.statusKind, m.status)
-}
-
-func (m *Model) persistentHint() string {
-	if m.modeHint == "" {
-		return ""
-	}
-	if m.modeHintState != m.state {
-		return ""
-	}
-	return renderGuidance(m.modeHint)
-}
-
 func (m *Model) noticeBlock() string {
 	notices := make([]string, 0, 2)
-	if hint := m.persistentHint(); hint != "" {
-		notices = append(notices, hint)
+	if m.modeHintState == m.state {
+		if hint := renderGuidance(m.modeHint); hint != "" {
+			notices = append(notices, hint)
+		}
 	}
-	if status := m.transientStatus(); status != "" && m.status != m.modeHint {
-		notices = append(notices, status)
+	if m.status != "" && m.status != m.modeHint {
+		if status := statusStyle(m.statusKind).Render(m.status); status != "" {
+			notices = append(notices, status)
+		}
 	}
 	return strings.Join(notices, "\n")
 }
 
-// noticeView wraps the notice block to the pane content width so that height
-// bookkeeping matches what the pane actually renders for long messages.
+// Wrap before measuring height so long notices fit the pane.
 func (m *Model) noticeView() string {
 	notices := m.noticeBlock()
 	if notices == "" {
@@ -112,46 +63,7 @@ func (m *Model) noticeView() string {
 	return lipgloss.NewStyle().Width(m.mainContentWidth()).Render(notices)
 }
 
-func renderGuidance(text string) string {
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return ""
-	}
-	parts := make([]string, len(words))
-	for i, word := range words {
-		parts[i] = renderGuidanceWord(word)
-	}
-	return strings.Join(parts, helpStyle.Render(" "))
-}
-
-func renderGuidanceWord(word string) string {
-	core := strings.Trim(word, ".,;:()[]{}")
-	if !isGuidanceKey(core) {
-		return helpStyle.Render(word)
-	}
-	before, after, ok := strings.Cut(word, core)
-	if !ok {
-		return helpStyle.Render(word)
-	}
-	return helpStyle.Render(before) +
-		helpKeyStyle.Render(core) +
-		helpStyle.Render(after)
-}
-
-func isGuidanceKey(word string) bool {
-	switch strings.ToLower(word) {
-	case "enter", "esc", "s", "q", "/", "g/g", "←/→", "↑/↓", "↵":
-		return true
-	default:
-		return false
-	}
-}
-
-// bannerMinHeight keeps the tall ASCII banner from eating the main pane on
-// short terminals; below it the header falls back to the plain brand text.
-// bannerGap separates the banner from the summary column, and
-// bannerSummaryTopPadding lowers the summary so it sits visually centered in
-// the banner's top half, and bannerMinSummaryWidth keeps it readable.
+// Hide the banner when it would crowd the main pane or summary.
 const (
 	bannerMinHeight         = 24
 	bannerGap               = 3
@@ -181,16 +93,17 @@ func (m *Model) showBanner(contentWidth int) bool {
 
 func (m *Model) renderRunningSummary(width int) string {
 	if m.service == nil {
-		return mutedStyle.Width(width).Render(m.runningSummary())
+		return mutedStyle.Width(width).Render("Not running")
 	}
-	summary := m.runningSummary()
-	if width < 72 {
-		summary = m.compactRunningSummary()
+	summary := m.runningStatus()
+	if node := m.currentNode(); node != nil {
+		summary += "\n\n" + node.Name
+		if width >= 72 {
+			summary += "\n" + node.ServerSummary()
+		}
 	}
 	lines := strings.Split(summary, "\n")
-	if len(lines) > 0 {
-		lines[0] = statusSuccessStyle.Render(lines[0])
-	}
+	lines[0] = statusSuccessStyle.Render(lines[0])
 	styledNodeTitle := false
 	for i := 1; i < len(lines); i++ {
 		if lines[i] == "" {

@@ -10,15 +10,10 @@ import (
 	"os"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
-// A benign error is one an ordinary client produces by disconnecting, so it is
-// classified rather than logged: the accept loop and every relay path use this to
-// decide whether a failure is worth a warning. Misclassifying either way is a
-// user-visible defect - a real upstream fault that stays silent, or a log filling
-// with lines for browsers closing tabs. Each case is wrapped because callers
-// always report through %w.
 func TestIsBenignClientError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -32,8 +27,7 @@ func TestIsBenignClientError(t *testing.T) {
 		// The SOCKS handshake runs under a deadline, so a client that connects and
 		// then stalls times out on every attempt.
 		{name: "net timeout", err: os.ErrDeadlineExceeded, want: true},
-		// Matched by message because net/http2 does not export it.
-		{name: "http2 response body closed", err: errors.New("http2: response body closed"), want: true},
+		{name: "closed text without standard error", err: errors.New("upstream closed"), want: false},
 		{name: "upstream failure is not benign", err: errors.New("bad X365 response"), want: false},
 	}
 
@@ -71,27 +65,54 @@ func TestRelayTCPCancelClosesBothSides(t *testing.T) {
 	assertPipeWriteClosed(t, upstreamPeer)
 }
 
-func TestRunRelayPairStopsOnceAndReturnsNonBenignError(t *testing.T) {
-	stopCh := make(chan struct{})
-	var stopCount atomic.Int32
-	errBoom := errors.New("boom")
-
-	err := runRelayPair(func() {
-		if stopCount.Add(1) == 1 {
-			close(stopCh)
-		}
-	}, func() error {
-		return errBoom
-	}, func() error {
-		<-stopCh
-		return io.EOF
-	})
-
-	if got := stopCount.Load(); got != 1 {
-		t.Fatalf("stop count=%d, want 1", got)
+func TestRunRelayPairWaitsForBothDirectionsAndPreservesFailures(t *testing.T) {
+	upstreamErr := errors.New("upstream failure")
+	tests := []struct {
+		name   string
+		first  error
+		second error
+		want   error
+	}{
+		{name: "both succeed"},
+		{name: "both disconnect", first: io.EOF, second: io.ErrClosedPipe},
+		{name: "failure before disconnect", first: upstreamErr, second: io.EOF, want: upstreamErr},
+		{name: "failure after disconnect", first: io.EOF, second: upstreamErr, want: upstreamErr},
 	}
-	if !errors.Is(err, errBoom) {
-		t.Fatalf("relay error=%v, want boom", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				release := make(chan struct{})
+				done := make(chan error, 1)
+				var stopCount atomic.Int32
+				go func() {
+					done <- runRelayPair(func() { stopCount.Add(1) },
+						func() error { return tt.first },
+						func() error { <-release; return tt.second })
+				}()
+				synctest.Wait()
+				if got := stopCount.Load(); got != 1 {
+					t.Errorf("stop count=%d after first direction finished, want 1", got)
+				}
+				select {
+				case err := <-done:
+					t.Errorf("relay returned %v before second direction finished", err)
+				default:
+				}
+				close(release)
+				synctest.Wait()
+				select {
+				case err := <-done:
+					if !errors.Is(err, tt.want) {
+						t.Errorf("relay error=%v, want %v", err, tt.want)
+					}
+				default:
+					t.Error("relay did not return after both directions finished")
+				}
+				if got := stopCount.Load(); got != 1 {
+					t.Errorf("stop count=%d, want exactly 1", got)
+				}
+			})
+		})
 	}
 }
 
@@ -131,7 +152,7 @@ func BenchmarkRelayCopy(b *testing.B) {
 		var dst bytes.Buffer
 		stats := &Stats{}
 		err := copyWithPooledBuffer(
-			countingWriter{writer: &dst, add: stats.AddUpload},
+			relayWriter{writer: &dst, add: stats.AddUpload},
 			bytes.NewReader(payload),
 		)
 		if err != nil {
@@ -145,10 +166,10 @@ func BenchmarkRelayCopy(b *testing.B) {
 
 func assertPipeWriteClosed(t *testing.T, conn net.Conn) {
 	t.Helper()
-	if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
-		return
+	if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("set pipe write deadline: %v", err)
 	}
-	if _, err := conn.Write([]byte("x")); err == nil {
-		t.Fatal("write succeeded after relay shutdown")
+	if _, err := conn.Write([]byte("x")); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("write after relay shutdown=%v, want closed pipe", err)
 	}
 }

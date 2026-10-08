@@ -14,8 +14,8 @@ import (
 
 const testWaitTimeout = time.Second
 
-func socksReadConnect(reader *bufio.Reader, writer io.Writer) (string, int, error) {
-	request, err := socksReadRequest(reader, writer)
+func readSOCKSConnect(reader *bufio.Reader, writer io.Writer) (string, int, error) {
+	request, err := readSOCKSRequest(reader, writer)
 	if err != nil {
 		return "", 0, err
 	}
@@ -26,10 +26,7 @@ func socksReadConnect(reader *bufio.Reader, writer io.Writer) (string, int, erro
 	return request.Host, request.Port, nil
 }
 
-// lookupTarget returns the cached target for key, or nil when the association
-// holds none, and marks a found target active. The relay path looks targets up
-// inside takeTargetForDatagram instead, so this exists only to let tests inspect
-// the target cache.
+// Inspect and refresh cached targets without initiating an open.
 func (a *udpAssociation) lookupTarget(key string) (*udpTarget, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -55,9 +52,6 @@ func receiveWithin[T any](tb testing.TB, ch <-chan T, label string) T {
 	return zero
 }
 
-// waitFor blocks until cond holds. UDP destinations are opened off the client
-// relay loop, so the effects of a forwarded datagram land after the call that
-// triggered it returns.
 func waitFor(tb testing.TB, cond func() bool, label string) {
 	tb.Helper()
 	deadline := time.Now().Add(testWaitTimeout)
@@ -78,12 +72,7 @@ func requireNoReceive[T any](tb testing.TB, ch <-chan T, label string) {
 	}
 }
 
-// logRecorder collects formatted log lines from a Config logger.
-//
-// It is mutex-guarded because a UDP association logs from more goroutines than
-// the one under test: target opens run off the client relay loop and target
-// relays run per destination, so an unsynchronized slice append races the test
-// goroutine's own forwarding calls.
+// Target opens and relays log concurrently with test actions.
 type logRecorder struct {
 	mu    sync.Mutex
 	lines []string
@@ -103,7 +92,6 @@ func (r *logRecorder) all() []string {
 	return slices.Clone(r.lines)
 }
 
-// count reports how many recorded lines contain substr.
 func (r *logRecorder) count(substr string) int {
 	n := 0
 	for _, line := range r.all() {

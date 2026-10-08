@@ -1,14 +1,12 @@
 # Configuration Reference
 
-`config.yaml` is private runtime input. It is usually produced by the efanrev
-reverse workflow and should not be committed, pasted into docs, or used as the
-basis for examples. See [`privacy.md`](privacy.md) for sanitization rules.
+`config.yaml` is private runtime input; see [privacy](privacy.md).
+Use one YAML document and one node source: `proxies`, or `proxies_tmpl` with
+`proxies_uuid`.
 
 ## Plain Config Example
 
-This is the decrypted config shape. The committed `config.reference.yaml`
-template uses `proxies_tmpl` and `proxies_uuid` instead; see
-[Committed Template Format](#committed-template-format).
+For the packed alternative, see [Committed Template Format](#committed-template-format).
 
 ```yaml
 listen: 127.0.0.1:10865
@@ -30,22 +28,13 @@ proxies:
 
 Top-level fields:
 
-- `listen`: optional local SOCKS5 listen address. Defaults to
-  `127.0.0.1:10865`. Keep it on a loopback address: the adapter supports
-  SOCKS5 no-auth only, so a non-loopback bind exposes an unauthenticated proxy
-  and is not a supported multi-user deployment.
+- `listen`: local SOCKS5 address, default `127.0.0.1:10865`. Keep it on
+  loopback: SOCKS5 uses no-auth.
 - `log`: optional runtime logging settings. Defaults to `level: info`,
   `output: logs/app.log`, and `format: text`.
 - `proxies`: map of display names to lists of `x365://` node URLs.
 - `sniff.shadowsocks`: optional list of first-hop Shadowsocks landing servers
   used only for display-oriented target sniffing.
-
-Older plaintext dumps without the `proxies` wrapper may need to be regenerated
-with the current decrypt workflow.
-
-Keep placeholders in committed examples. Use `example.org`, `example.net`,
-`203.0.113.10`, and `<your-x365-uuid>` instead of values copied from a private
-node. Do not derive examples by editing private node strings.
 
 ## Node URI Fields
 
@@ -62,8 +51,7 @@ The adapter requires:
 - `server` and URI `port`: TCP endpoint for the outer transport.
 - `path`: HTTP/2 POST path for xhttp.
 - `host`: HTTP authority/Host header and default request host.
-- `sni`: REALITY TLS server name. The config parser currently requires this
-  query field.
+- `sni`: required REALITY TLS server name.
 - `pbk`: REALITY X25519 public key, base64url encoded, 32 bytes after decode.
 - `sid`: REALITY short ID, hex encoded, at most 8 bytes.
 - `fp`: optional uTLS fingerprint. Supported values include `firefox`,
@@ -74,84 +62,63 @@ See [`x365-protocol.md`](x365-protocol.md) for byte-level protocol details.
 
 ## Committed Template Format
 
-`config.reference.yaml` keeps the node template in `proxies_tmpl` and leaves the
-account UUID out of git. To use it:
+`config.reference.yaml` stores nodes in `proxies_tmpl` without the account UUID.
+See [quick start](../README.md#quick-start) to use it.
 
-1. Copy `config.reference.yaml` to `config.yaml`.
-2. Replace `proxies_uuid` with your UUID.
-3. Start the TUI.
+`proxies_tmpl` is zlib-compressed, base64-encoded YAML with URLs of the form
+`x365://@<server>...`. Loading inserts `proxies_uuid` as userinfo. Legacy
+uncompressed base64 YAML is also accepted; unpacked data is limited to 4 MiB.
 
-`proxies_tmpl` is zlib-compressed, base64-encoded YAML with each URL written as
-`x365://@<server>...`. At load time, `efanadp` base64-decodes the field,
-decompresses it, inserts `proxies_uuid` before the `@`, and parses it like a
-normal `proxies` block. Older uncompressed base64 templates are accepted for
-local migration, but new reference files are written in the compressed format.
-Unpacked template data is limited to 4 MiB so malformed compressed input cannot
-consume unbounded memory during startup.
+Follow [template privacy rules](privacy.md#config-template): compression is not
+redaction, and payload inspection requires an explicit audit or regeneration task.
 
-Compression and base64 are not redaction. The maintenance command removes X365
-UUID userinfo only, so the generated template can still carry node hosts, paths,
-public keys, short IDs, and other provider-specific material. Review the
-generated file before committing it and keep documentation examples sanitized.
-
-Do not decode, decompress, expand, or quote `proxies_tmpl` during routine docs
-or issue triage. Inspect it only when auditing or regenerating the committed
-template.
-Use [`privacy.md`](privacy.md) as the checklist before sharing or committing
-template changes.
-
-When the private `config.yaml` changes, refresh the committed reference with:
+Regenerate for config-shape changes or explicit template maintenance. The command
+defaults to the paths below; override `--in` and `--out` as needed:
 
 ```bash
-make config-reference
+make run ARGS="config-reference --in config.yaml --out config.reference.yaml"
 ```
 
-The maintenance command reads `config.yaml` and writes `config.reference.yaml` by
-default. It copies `listen`, emits the sanitized default `log` block, and writes
-UUID-stripped proxy templates; private `sniff.shadowsocks` entries are not
-copied, only the commented placeholder is emitted. The command also accepts
-explicit paths:
-
-```bash
-make config-reference ARGS="--in config.yaml --out config.reference.yaml"
-```
+It copies `listen`, emits the default `log` block, strips X365 UUID userinfo,
+and replaces private sniffing entries with a commented placeholder.
 
 ## Runtime Config Changes
 
-`efanadp` loads one config file during startup. When `listen`, `log`, node URLs,
-or sniffing settings change, stop the process and start it again. Use `--config`
-/ `-c` to point a launch at a different YAML file. Without `--config`, the TUI
-uses `configPath` from `settings.json` in the current working directory, then
-falls back to `config.yaml`.
+Config changes require a process restart. Startup selects the first non-empty
+path: `--config` / `-c`, then `configPath` from `settings.json` in the working
+directory, then `config.yaml`. A missing or invalid file fails startup; it does
+not trigger fallback to another path.
+
+## Remembered Settings
+
+The app saves `configPath` (including explicit CLI paths) and `nodeName` to
+`settings.json` in the working directory when entering the TUI and before starting
+a selected session. It saves no node contents; saving does not confirm listener
+binding or upstream reachability.
+
+On startup, the TUI attempts to start the node matching the remembered name;
+if absent, it clears the name and shows node selection. Names are display labels
+and may refer to different endpoints after config edits.
 
 ## Logging
 
 `log.level` accepts `debug`, `info`, `warn`, `warning`, and `error`. `warning`
 is normalized to `warn`.
 
-`log.output` accepts `stdout`, `stderr`, or a normal local path. Path outputs are
-rotated at 100 MiB per file, keeping 4 rotated files for up to 30 days. It must
-not resolve to the active config file or `settings.json`, because log writes
-would corrupt runtime input or saved startup state.
+`log.output` accepts `stdout`, `stderr`, or a local path. It must not resolve to
+the active config file or `settings.json`, which log writes would corrupt.
+See [logging](logging.md#outputs) for rotation and terminal output.
 
 `log.format` accepts `text` and `json`.
 
 The legacy `log_path` field is no longer accepted; use `log.output` instead.
-See [`logging.md`](logging.md) for output behavior and event examples.
-
-Use exactly one node source: either `proxies`, or `proxies_tmpl` with
-`proxies_uuid`. Config files containing both are rejected rather than silently
-choosing one. A config file must also contain a single YAML document; additional
-documents are rejected so no configuration is silently ignored.
 
 ## Shadowsocks Target Sniffing
 
-The `sniff.shadowsocks` block is optional. It is only needed when `efanadp` is
-the first hop of a chain and the next hop is a Shadowsocks landing server. With
-a matching `server`/`port` and the correct `method`/`password`, the adapter
-decrypts only the first Shadowsocks metadata chunk to display the inner target.
-`cipher` is accepted as a legacy alias for `method`; committed examples should
-prefer `method`.
+Use `sniff.shadowsocks` when the next hop is a Shadowsocks landing server.
+Matching `server`/`port` and valid `method`/`password` let the adapter inspect
+initial TCP metadata or UDP datagrams to display the inner target. `cipher`
+is a legacy alias for `method`; prefer `method` in new configs.
 
 Supported methods:
 
@@ -164,6 +131,8 @@ Supported methods:
 For `2022-blake3-*` methods, `password` must be the base64 PSK used by mihomo.
 The `server_key:user_key` EIH form is also accepted.
 
-Missing, unsupported, or non-matching sniff config falls back to the original
-SOCKS target display. Sniffing is for observability only; relay behavior does not
-depend on discovering the inner target.
+Omitting sniffing leaves the original SOCKS target display. Entries with missing
+`server`, `method` (or legacy `cipher`), or `password`, or an invalid `port`,
+fail config loading.
+Unsupported methods, unusable keys, unmatched targets, or failed inspection
+leave the original label; sniffing never changes forwarding.

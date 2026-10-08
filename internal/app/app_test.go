@@ -8,9 +8,6 @@ import (
 	"testing"
 )
 
-// The root command launches the TUI and hands it a config path. Every accepted
-// spelling has to reach the same place: a flag form that silently parses as
-// something else would start the TUI against the wrong config.
 func TestRunArgsRunsTUIWithConfigPath(t *testing.T) {
 	tests := []struct {
 		name string
@@ -73,10 +70,6 @@ func TestRunArgsWritesRootHelp(t *testing.T) {
 	}
 }
 
-// The generated template is the file that gets committed, so every accepted flag
-// spelling must produce the same sanitized output. A flag form that parsed as
-// something else would write the reference somewhere unchecked, or write a
-// reference that still carries the account UUID.
 func TestRunArgsConfigReferenceWritesSanitizedReference(t *testing.T) {
 	flagForms := map[string]func(input, output string) []string{
 		"double dash": func(input, output string) []string {

@@ -1,15 +1,16 @@
 package tui
 
 import (
-	"context"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/rbee3u/efanadp/internal/proxy"
+	"github.com/rbee3u/efanadp/internal/session"
 	"github.com/rbee3u/efanadp/internal/x365"
 )
 
@@ -22,10 +23,15 @@ func stripANSI(value string) string {
 }
 
 func newTestModel(opts Options) *Model {
-	runtime := newRuntimeConfig(opts)
-	// Unit models should not write repo-local settings unless a test opts in.
-	runtime.settingsPath = ""
-	return newModel(startupConfig{runtime: runtime}, modelDeps{})
+	if opts.Listen == "" {
+		opts.Listen = "127.0.0.1:10865"
+	}
+	if opts.Prepare == nil {
+		opts.Prepare = func(x365.Node) (session.StartFunc, error) {
+			return func() session.Service { return newFakeService() }, nil
+		}
+	}
+	return newModel(opts)
 }
 
 func setRunningNode(model *Model, node x365.Node) {
@@ -103,11 +109,15 @@ func testNode() x365.Node {
 	}
 }
 
-func nodeItems(nodes []x365.Node) []list.Item {
-	return nodeItemsWithCurrent(nodes, "")
+type fakeService struct {
+	done   chan struct{}
+	once   sync.Once
+	events []proxy.Event
+	err    error
 }
 
-func fakeServeSOCKS(ctx context.Context, _ string, _ proxy.Config) error {
-	<-ctx.Done()
-	return nil
-}
+func newFakeService() *fakeService               { return &fakeService{done: make(chan struct{})} }
+func (s *fakeService) Stop()                     { s.once.Do(func() { close(s.done) }) }
+func (s *fakeService) Done() <-chan struct{}     { return s.done }
+func (s *fakeService) Err() error                { return s.err }
+func (s *fakeService) NextEvents() []proxy.Event { events := s.events; s.events = nil; return events }

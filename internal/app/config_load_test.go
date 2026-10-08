@@ -1,4 +1,4 @@
-package tui
+package app
 
 import (
 	"errors"
@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/rbee3u/efanadp/internal/config"
 )
 
 func TestUserConfigLoadErrorMapsCommonConfigFailures(t *testing.T) {
@@ -16,42 +18,42 @@ func TestUserConfigLoadErrorMapsCommonConfigFailures(t *testing.T) {
 	}{
 		{
 			name: "uuid placeholder",
-			err:  errors.New(`config.yaml: invalid proxies_uuid: parse UUID "<your-x365-uuid>": invalid UUID length`),
+			err:  &config.Error{Kind: config.UUIDPlaceholder, Err: errors.New("config.yaml: diagnostic wording can change")},
 			want: "proxies_uuid is still the reference placeholder",
 		},
 		{
 			name: "template base64",
-			err:  errors.New("config.yaml: decode proxies_tmpl: illegal base64 data at input byte 0"),
+			err:  &config.Error{Kind: config.TemplateBase64, Err: errors.New("config.yaml: diagnostic wording can change")},
 			want: "proxies_tmpl is not valid base64 template data",
 		},
 		{
 			name: "template compression",
-			err:  errors.New("config.yaml: decompress proxies_tmpl: zlib: invalid header"),
+			err:  &config.Error{Kind: config.TemplateCompression, Err: errors.New("config.yaml: diagnostic wording can change")},
 			want: "proxies_tmpl is not valid zlib-compressed template data",
 		},
 		{
 			name: "template too large",
-			err:  errors.New("config.yaml: decompress proxies_tmpl: proxies_tmpl exceeds 4194304-byte unpacked limit"),
+			err:  &config.Error{Kind: config.TemplateTooLarge, Err: errors.New("config.yaml: diagnostic wording can change")},
 			want: "proxies_tmpl is too large",
 		},
 		{
 			name: "template yaml",
-			err:  errors.New("config.yaml: parse proxies_tmpl YAML: did not find expected key"),
+			err:  &config.Error{Kind: config.TemplateYAML, Err: errors.New("config.yaml: diagnostic wording can change")},
 			want: "proxies_tmpl does not unpack to valid YAML",
 		},
 		{
 			name: "empty template groups",
-			err:  errors.New("config.yaml: proxies_tmpl contains no proxy groups"),
+			err:  &config.Error{Kind: config.TemplateEmpty, Err: errors.New("config.yaml: diagnostic wording can change")},
 			want: "proxies_tmpl contains no proxy groups",
 		},
 		{
 			name: "template includes uuid",
-			err:  errors.New("config.yaml: test: x365 URL template must omit UUID as x365://@server"),
+			err:  &config.Error{Kind: config.TemplateUserInfo, Err: errors.New("config.yaml: diagnostic wording can change")},
 			want: "x365 templates in proxies_tmpl must be x365://@server...",
 		},
 		{
 			name: "proxy list shape",
-			err:  errors.New("config.yaml: test: expected a list of x365 URLs, got map[string]interface {}"),
+			err:  &config.Error{Kind: config.ProxyListShape, Err: errors.New("config.yaml: diagnostic wording can change")},
 			want: "Proxy groups in proxies have the wrong format",
 		},
 		{

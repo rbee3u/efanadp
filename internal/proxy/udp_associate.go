@@ -6,8 +6,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"slices"
-	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -40,7 +38,7 @@ func handleSOCKSUDPAssociate(
 		return err
 	}
 
-	tracker := newConnectionTracker(cfg, "udp", client.RemoteAddr().String(), "UDP_ASSOCIATE "+request.Address)
+	tracker := newConnectionTracker(cfg, "udp", client.RemoteAddr().String(), "UDP_ASSOCIATE "+request.address())
 	tracker.open()
 	var relayErr error
 	defer func() {
@@ -50,10 +48,8 @@ func handleSOCKSUDPAssociate(
 	assocCtx, cancel := context.WithCancel(ctx)
 	assoc := newUDPAssociation(assocCtx.Done(), cfg, udpConn, tracker)
 	assoc.expectedClientAddr = expectedUDPClientAddr(client.RemoteAddr(), request.Port)
-	// close waits for the idle sweeper, and the sweeper only returns once
-	// assocCtx is done, so the cancel must run first. Deferring both here in one
-	// function keeps that order a property of this block rather than something
-	// relay has to guarantee by calling its stop func on every path.
+	// Cancel before close: close waits for the sweeper, which exits on
+	// cancellation.
 	defer func() {
 		cancel()
 		assoc.close()
@@ -77,35 +73,21 @@ type udpAssociation struct {
 	tracker *connectionTracker
 	stats   *Stats
 
-	// clientAddr is the pinned association client. It is written once, by the
-	// first valid datagram, and read by every target relay goroutine, so it is
-	// atomic and the pointed-to address is never mutated afterwards.
+	// clientAddr is pinned once and shared by target relays; its value is
+	// immutable.
 	clientAddr atomic.Pointer[net.UDPAddr]
-	// expectedClientAddr ties UDP traffic back to the TCP control client. Its IP
-	// always comes from the accepted TCP connection; a non-zero port comes from
-	// the UDP_ASSOCIATE request, while zero leaves the source port to be pinned by
-	// the first accepted datagram.
+	// The TCP peer supplies the IP; a non-zero request port constrains the
+	// source. Port zero is pinned by the first accepted datagram.
 	expectedClientAddr *net.UDPAddr
 
 	mu      sync.Mutex
 	targets map[string]*udpTarget
-	// openingTargets holds the destinations with an open in flight, along with
-	// the datagrams waiting on each one, so only one open runs per destination
-	// and datagrams that arrive during it are not lost. See
+	// Opening targets retain queued datagrams until drained; see
 	// takeTargetForDatagram.
 	openingTargets map[string]*openingTarget
 	isClosed       bool
 
-	// sniffedInnerTargets holds every sniffed inner destination already reported,
-	// capped at maxSniffedInnerTargets. See recordInnerTarget.
-	sniffedInnerTargets map[string]struct{}
-
-	// warnedDrops records which drop reasons have already been warned about, so
-	// a steady stream of dropped datagrams costs one log line instead of one per
-	// datagram. See warnDropOnce.
-	warnedDrops            map[string]struct{}
-	warnedLabelOscillation bool
-	label                  string
+	observation udpObservation // guarded by mu
 
 	targetGroup  sync.WaitGroup
 	sweeperGroup sync.WaitGroup
@@ -128,15 +110,14 @@ func newUDPAssociation(
 		stats = tracker.stats
 	}
 	return &udpAssociation{
-		cfg:                 cfg,
-		ctxDone:             done,
-		udpConn:             udpConn,
-		tracker:             tracker,
-		targets:             make(map[string]*udpTarget),
-		openingTargets:      make(map[string]*openingTarget),
-		sniffedInnerTargets: make(map[string]struct{}),
-		warnedDrops:         make(map[string]struct{}),
-		stats:               stats,
+		cfg:            cfg,
+		ctxDone:        done,
+		udpConn:        udpConn,
+		tracker:        tracker,
+		targets:        make(map[string]*udpTarget),
+		openingTargets: make(map[string]*openingTarget),
+		observation:    newUDPObservation(),
+		stats:          stats,
 	}
 }
 
@@ -202,18 +183,7 @@ func (a *udpAssociation) readClientPacket(buf []byte) (udpClientPacket, bool, er
 	return udpClientPacket{addr: addr, datagram: datagram}, true, nil
 }
 
-// Drop reasons are warned about once per association. Each one is a standing
-// policy rather than a transient fault, so the condition repeats for every
-// datagram a client keeps sending: a browser retrying QUIC produces UDP/443
-// drops for as long as it is open, and a fake-IP or fragmenting client does the
-// same. One line per datagram would then write the drop rate straight into the
-// log file, which rotates but retains, so the first occurrence carries the
-// diagnosis and the rest stay silent.
-//
-// Label oscillation is the same: when one association carries several inner
-// targets through one Shadowsocks server, updateTarget fires per datagram and
-// flips the label on nearly every one, logging and emitting an event each time.
-// The first oscillation warns; the rest stay silent.
+// Warn once per reason per association to avoid per-packet log volume.
 const (
 	dropReasonMalformed      = "malformed"
 	dropReasonFragmented     = "fragmented"
@@ -248,28 +218,12 @@ func (a *udpAssociation) shouldDropClientDatagram(datagram socksUDPDatagram) boo
 	return false
 }
 
-// warnDropOnce reports whether reason should be logged, which is true only for
-// the first dropped datagram with that reason on this association.
-func (a *udpAssociation) warnDropOnce(reason string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if _, ok := a.warnedDrops[reason]; ok {
-		return false
-	}
-	a.warnedDrops[reason] = struct{}{}
-	return true
-}
-
 func (a *udpAssociation) forwardClientPacket(ctx context.Context, packet udpClientPacket) error {
 	datagram := packet.datagram
 	if !a.adoptClientAddr(packet.addr) {
 		return nil
 	}
 	key := udpTargetKey(datagram.Host, datagram.Port)
-	// The open runs off this loop rather than on it, so a handshake never delays
-	// datagrams bound for other destinations. Datagrams that arrive for a
-	// destination still opening ride along with the open instead of being
-	// dropped.
 	target, dropReason, err := a.takeTargetForDatagram(ctx, key, datagram.Host, datagram.Port, datagram.Payload)
 	if err != nil {
 		if a.shouldStopRelay(err) {
@@ -298,128 +252,4 @@ func (a *udpAssociation) isContextDone() bool {
 	default:
 		return false
 	}
-}
-
-// adoptClientAddr pins the association to the first source that sends a valid
-// datagram and reports whether addr is that source. RFC 1928 scopes a
-// UDP_ASSOCIATE relay to the client that created it, so datagrams from any
-// other local source are dropped instead of being forwarded; without this, the
-// most recent sender would also capture every inbound response.
-func (a *udpAssociation) adoptClientAddr(addr *net.UDPAddr) bool {
-	if !a.allowsClientAddr(addr) {
-		return false
-	}
-	// The steady state is an already-pinned client sending another datagram, so
-	// that path compares without copying.
-	pinned := a.clientAddr.Load()
-	if pinned == nil {
-		// ReadFromUDP reuses its buffer, so the address must be copied before
-		// it is retained.
-		copied := *addr
-		copied.IP = slices.Clone(addr.IP)
-		if a.clientAddr.CompareAndSwap(nil, &copied) {
-			return true
-		}
-		// Another source won the CAS, so compare against whatever it pinned.
-		// clientAddr only ever moves from nil to non-nil, so this reload cannot
-		// observe nil; the branch below is unreachable and kept as a guard.
-		pinned = a.clientAddr.Load()
-		if pinned == nil {
-			return false
-		}
-	}
-	if sameUDPAddr(pinned, addr) {
-		return true
-	}
-	if a.warnDropOnce(dropReasonForeign) {
-		a.cfg.warnf("[udp] drop datagram from=%s reason=%s client=%s", addr, dropReasonForeign, pinned)
-	}
-	return false
-}
-
-// allowsClientAddr rejects a source before parsing its SOCKS envelope. This is
-// deliberately separate from pinning: only a valid, allowed datagram may claim
-// an unspecified source port, but a foreign sender must not be able to produce
-// malformed-packet logs before that happens.
-func (a *udpAssociation) allowsClientAddr(addr *net.UDPAddr) bool {
-	if !matchesExpectedUDPClient(a.expectedClientAddr, addr) {
-		if a.warnDropOnce(dropReasonForeign) {
-			a.cfg.warnf(
-				"[udp] drop datagram from=%s reason=%s client=%s",
-				addr,
-				dropReasonForeign,
-				formatExpectedUDPClient(a.expectedClientAddr),
-			)
-		}
-		return false
-	}
-	pinned := a.clientAddr.Load()
-	if pinned == nil || sameUDPAddr(pinned, addr) {
-		return true
-	}
-	if a.warnDropOnce(dropReasonForeign) {
-		a.cfg.warnf("[udp] drop datagram from=%s reason=%s client=%s", addr, dropReasonForeign, pinned)
-	}
-	return false
-}
-
-func expectedUDPClientAddr(remote net.Addr, requestedPort int) *net.UDPAddr {
-	tcpAddr, ok := remote.(*net.TCPAddr)
-	if !ok || tcpAddr.IP == nil || tcpAddr.IP.IsUnspecified() {
-		return nil
-	}
-	return &net.UDPAddr{
-		IP:   slices.Clone(tcpAddr.IP),
-		Port: requestedPort,
-		Zone: tcpAddr.Zone,
-	}
-}
-
-func matchesExpectedUDPClient(expected, actual *net.UDPAddr) bool {
-	if expected == nil {
-		return true
-	}
-	if actual == nil || !expected.IP.Equal(actual.IP) {
-		return false
-	}
-	if expected.Zone != "" && expected.Zone != actual.Zone {
-		return false
-	}
-	return expected.Port == 0 || expected.Port == actual.Port
-}
-
-func formatExpectedUDPClient(addr *net.UDPAddr) string {
-	if addr == nil {
-		return "unknown"
-	}
-	host := addr.IP.String()
-	if addr.Zone != "" {
-		host += "%" + addr.Zone
-	}
-	port := "*"
-	if addr.Port != 0 {
-		port = strconv.Itoa(addr.Port)
-	}
-	return net.JoinHostPort(host, port)
-}
-
-func sameUDPAddr(left, right *net.UDPAddr) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-	return left.Port == right.Port && left.Zone == right.Zone && left.IP.Equal(right.IP)
-}
-
-// pinnedClientAddr returns the pinned client address, or nil before one is pinned.
-// The result is shared and must not be mutated; WriteToUDP only reads it.
-func (a *udpAssociation) pinnedClientAddr() *net.UDPAddr {
-	return a.clientAddr.Load()
-}
-
-func udpBindAddrForClient(client net.Conn) *net.UDPAddr {
-	ip := net.IPv4(127, 0, 0, 1)
-	if tcpAddr, ok := client.LocalAddr().(*net.TCPAddr); ok && tcpAddr.IP != nil && !tcpAddr.IP.IsUnspecified() {
-		ip = tcpAddr.IP
-	}
-	return &net.UDPAddr{IP: ip, Port: 0}
 }

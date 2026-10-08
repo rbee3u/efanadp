@@ -9,19 +9,13 @@ import (
 	"testing"
 )
 
-// Opening a multipath stream is a sequence of writes and reads, and a failure at
-// any step has to close the stream and name the step. The stream owns a TCP
-// connection and its HTTP/2 state, so one left open pins both for the life of the
-// process; the step name is what tells the user where a node stopped working.
-//
-// Two steps are unreachable from here: the request build takes fixed control-host
-// constants, and the framer comes from crypto/rand.
+// Request-build failure and random-ID failure are not injected: the control
+// target is fixed and IDs use crypto/rand.
 func TestOpenMultipathFailuresCloseStreamAndNameStage(t *testing.T) {
 	errBoom := errors.New("write failed")
 
 	tests := []struct {
-		name string
-		// newStream supplies the upstream this open runs against.
+		name      string
 		newStream func() closeCountingTestStream
 		destPort  int
 		want      string
@@ -47,15 +41,13 @@ func TestOpenMultipathFailuresCloseStreamAndNameStage(t *testing.T) {
 			newStream: func() closeCountingTestStream {
 				return &memoryStream{read: *bytes.NewBufferString("X365\x00")}
 			},
-			// An unencodable port fails after the response is accepted.
 			destPort: -1,
 			want:     "build multipath hello",
 		},
 		{
 			name: "write hello",
 			newStream: func() closeCountingTestStream {
-				// The request write succeeds and the response is accepted, so the
-				// second write is the hello.
+				// The hello is the second write, after the X365 request.
 				return &writeFailAtStream{
 					failOn: 2,
 					err:    errBoom,
@@ -96,8 +88,6 @@ func TestOpenMultipathFailuresCloseStreamAndNameStage(t *testing.T) {
 	}
 }
 
-// The server answers only after it has read the request, so the request has to go
-// out before the response is validated.
 func TestOpenMultipathWritesRequestBeforeReadingResponse(t *testing.T) {
 	userID, err := ParseUserID("00112233-4455-6677-8899-aabbccddeeff")
 	if err != nil {
@@ -113,8 +103,9 @@ func TestOpenMultipathWritesRequestBeforeReadingResponse(t *testing.T) {
 	}
 }
 
-func TestOpenX365MultipathWrapsTransportError(t *testing.T) {
-	_, err := openX365Multipath(t.Context(), Node{}, UserID{}, 0, "example.com", 443)
+func TestClientOpenTCPWrapsTransportError(t *testing.T) {
+	client := &Client{}
+	_, err := client.OpenTCP(t.Context(), "example.org", 443)
 	if err == nil {
 		t.Fatal("expected transport setup error")
 	}
@@ -181,7 +172,7 @@ func TestMultipathConnReadDirectDataFrameAndACKs(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream := &memoryStream{read: *bytes.NewBuffer(frameBytes)}
-	conn := newMultipathConn(stream, &multipathFramer{})
+	conn := newMultipathConn(stream)
 	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 5)
@@ -204,7 +195,7 @@ func TestMultipathConnReadBuffersPayloadRemainderAndACKsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream := &memoryStream{read: *bytes.NewBuffer(frameBytes)}
-	conn := newMultipathConn(stream, &multipathFramer{})
+	conn := newMultipathConn(stream)
 	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 2)
@@ -234,7 +225,7 @@ func TestMultipathConnReadLargeFrameBuffersOnlyRemainder(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream := &memoryStream{read: *bytes.NewBuffer(frameBytes)}
-	conn := newMultipathConn(stream, &multipathFramer{})
+	conn := newMultipathConn(stream)
 	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 64*1024)
@@ -258,7 +249,7 @@ func TestMultipathConnReadLargeFrameEOFInRemainderDoesNotACK(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream := &memoryStream{read: *bytes.NewBuffer(frameBytes[:frameHeaderSize+3])}
-	conn := newMultipathConn(stream, &multipathFramer{})
+	conn := newMultipathConn(stream)
 	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 2)
@@ -279,7 +270,7 @@ func TestMultipathConnReadLargeFrameEOFInRemainderDoesNotACK(t *testing.T) {
 
 func TestMultipathConnCloseIsIdempotent(t *testing.T) {
 	stream := &memoryStream{}
-	conn := newMultipathConn(stream, &multipathFramer{})
+	conn := newMultipathConn(stream)
 
 	if err := conn.Close(); err != nil {
 		t.Fatal(err)
@@ -305,7 +296,7 @@ func TestMultipathConnCloseIsIdempotent(t *testing.T) {
 
 func TestMultipathConnCloseUnblocksActiveWrite(t *testing.T) {
 	stream := newBlockingWriteStream()
-	conn := newMultipathConn(stream, &multipathFramer{})
+	conn := newMultipathConn(stream)
 
 	writeDone := make(chan error, 1)
 	go func() {
@@ -328,7 +319,7 @@ func TestMultipathConnCloseUnblocksActiveWrite(t *testing.T) {
 
 func TestMultipathConnCloseBoundsStalledCloseFrame(t *testing.T) {
 	stream := newBlockingWriteStream()
-	conn := newMultipathConn(stream, &multipathFramer{})
+	conn := newMultipathConn(stream)
 
 	closeDone := make(chan error, 1)
 	go func() {
@@ -340,20 +331,16 @@ func TestMultipathConnCloseBoundsStalledCloseFrame(t *testing.T) {
 	}
 }
 
-// A payload write can fail after its frame header is already on the wire. The
-// stream is unrecoverable at that point: advancing the sequence, retrying a new
-// frame, or appending a close/ACK frame would make the peer interpret control
-// bytes as the missing payload.
 func TestMultipathConnWriteFailureIsTerminal(t *testing.T) {
 	errBoom := errors.New("payload write failed")
 	stream := &failNthRecordingStream{failOn: 2, err: errBoom}
-	framer := &multipathFramer{WriteSeq: 7}
-	conn := newMultipathConn(stream, framer)
+	conn := newMultipathConn(stream)
+	conn.writeSeq = 7
 
 	if _, err := conn.Write([]byte("abc")); !errors.Is(err, errBoom) {
 		t.Fatalf("first write err=%v, want %v", err, errBoom)
 	}
-	if got := framer.WriteSeq; got != 7 {
+	if got := conn.writeSeq; got != 7 {
 		t.Fatalf("write sequence=%d after failed frame, want 7", got)
 	}
 	if _, err := conn.Write([]byte("retry")); !errors.Is(err, errBoom) {
@@ -367,25 +354,59 @@ func TestMultipathConnWriteFailureIsTerminal(t *testing.T) {
 	if len(written) != frameHeaderSize {
 		t.Fatalf("written bytes=%d, want only the failed frame header", len(written))
 	}
-	header, payloadLen := parseFrameHeader(written)
-	if header.Type != frameData || header.Seq != 7 || payloadLen != 3 {
-		t.Fatalf("failed frame header=%+v payloadLen=%d", header, payloadLen)
+	header := parseFrameHeader(written)
+	if header.Type != frameData || header.Seq != 7 || header.PayloadLen != 3 {
+		t.Fatalf("failed frame header=%+v", header)
 	}
 	if got := stream.writeCalls(); got != 2 {
 		t.Fatalf("underlying write calls=%d, want header and failed payload only", got)
 	}
 }
 
-// TestMultipathConnReadDoesNotWaitForStalledWrite covers the deadlock the ACK
-// queue exists to prevent: a data frame write parked in the upstream
-// flow-control window must not stop the read side from delivering downloads.
+func TestMultipathConnWriteSequence(t *testing.T) {
+	stream := &memoryStream{}
+	conn := newMultipathConn(stream)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	for _, payload := range []string{"abc", "", "de"} {
+		if _, err := conn.Write([]byte(payload)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader := bytes.NewReader(stream.write.Bytes())
+	for _, want := range []struct {
+		kind    byte
+		seq     uint64
+		payload string
+	}{
+		{frameData, 0, "abc"},
+		{frameData, 3, ""},
+		{frameData, 3, "de"},
+		{frameClose, 5, ""},
+	} {
+		got, err := readFrameForTest(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Type != want.kind || got.Seq != want.seq || string(got.Payload) != want.payload {
+			t.Fatalf("frame=%+v, want type=%d seq=%d payload=%q", got, want.kind, want.seq, want.payload)
+		}
+	}
+	if reader.Len() != 0 {
+		t.Fatalf("unexpected trailing frame bytes: %d", reader.Len())
+	}
+}
+
 func TestMultipathConnReadDoesNotWaitForStalledWrite(t *testing.T) {
 	frameBytes, err := buildFrame(frameData, 7, []byte("hello"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	stream := newStalledWriteStream(frameBytes)
-	conn := newMultipathConn(stream, &multipathFramer{})
+	conn := newMultipathConn(stream)
 
 	writeDone := make(chan error, 1)
 	go func() {
@@ -416,12 +437,9 @@ func TestMultipathConnReadDoesNotWaitForStalledWrite(t *testing.T) {
 	}
 }
 
-// TestMultipathConnQueuedACKIsWrittenAfterWriteUnblocks shows a contended ACK is
-// deferred rather than dropped: once the busy frame write lock frees, the sender
-// goroutine writes the coalesced sequence, and only that newest one.
 func TestMultipathConnQueuedACKIsWrittenAfterWriteUnblocks(t *testing.T) {
 	stream := newRecordingStream()
-	conn := newMultipathConn(stream, &multipathFramer{})
+	conn := newMultipathConn(stream)
 	defer func() { _ = conn.Close() }()
 
 	// Holding the lock is what a write stalled in the flow-control window does.
@@ -472,7 +490,7 @@ func BenchmarkReadFrame(b *testing.B) {
 
 func BenchmarkMultipathConnWrite(b *testing.B) {
 	payload := bytes.Repeat([]byte("x"), 16*1024)
-	conn := newMultipathConn(discardStream{}, &multipathFramer{})
+	conn := newMultipathConn(discardStream{})
 	defer func() { _ = conn.Close() }()
 
 	b.ReportAllocs()
@@ -500,7 +518,7 @@ func BenchmarkMultipathConnReadLargeFrameSmallBuffer(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		reader.Reset(frameBytes)
-		conn := newMultipathConn(stream, &multipathFramer{})
+		conn := newMultipathConn(stream)
 		n, err := conn.Read(buf)
 		if err != nil {
 			b.Fatal(err)
@@ -517,8 +535,6 @@ func BenchmarkMultipathConnReadLargeFrameSmallBuffer(b *testing.B) {
 	}
 }
 
-// closeCountingTestStream is an upstream fixture that reports how many times it
-// was closed, so a test can assert an open closed it exactly once.
 type closeCountingTestStream interface {
 	io.ReadWriteCloser
 	closes() int
@@ -744,8 +760,6 @@ func (s *stalledWriteStream) Close() error {
 	return nil
 }
 
-// recordingStream reports each write on a channel so a test can wait for one
-// that another goroutine produces.
 type recordingStream struct {
 	writes chan []byte
 

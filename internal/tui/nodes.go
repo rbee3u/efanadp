@@ -3,11 +3,12 @@ package tui
 import (
 	"slices"
 	"strings"
-
-	"github.com/rbee3u/efanadp/internal/x365"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/rbee3u/efanadp/internal/x365"
 )
 
 type nodeItem struct {
@@ -44,7 +45,11 @@ func (i nodeItem) FilterValue() string {
 	return i.node.Label()
 }
 
-func newNodeList(items []list.Item) list.Model {
+func newNodeList(nodes []x365.Node, currentName string) list.Model {
+	items := make([]list.Item, 0, len(nodes))
+	for _, node := range nodes {
+		items = append(items, nodeItem{node: node, isCurrent: currentName != "" && node.Name == currentName})
+	}
 	l := list.New(items, styledNodeDelegate(), 80, 18)
 	l.Title = "Select Node"
 	l.SetShowStatusBar(false)
@@ -57,16 +62,8 @@ func newNodeList(items []list.Item) list.Model {
 	return l
 }
 
-func nodeItemsWithCurrent(nodes []x365.Node, currentName string) []list.Item {
-	items := make([]list.Item, 0, len(nodes))
-	for _, node := range nodes {
-		items = append(items, nodeItem{node: node, isCurrent: currentName != "" && node.Name == currentName})
-	}
-	return items
-}
-
 func nodesForDisplay(nodes []x365.Node) []x365.Node {
-	sorted := append([]x365.Node(nil), nodes...)
+	sorted := slices.Clone(nodes)
 	slices.SortFunc(sorted, func(left, right x365.Node) int {
 		leftRank := nodeRegionPreferenceRank(left.Name)
 		rightRank := nodeRegionPreferenceRank(right.Name)
@@ -81,80 +78,61 @@ func nodesForDisplay(nodes []x365.Node) []x365.Node {
 func nodeRegionPreferenceRank(name string) int {
 	name = strings.ToLower(name)
 	for rank, region := range nodeRegionPreferences {
-		if matchesNodeRegion(name, region) {
+		for _, alias := range region.aliases {
+			if strings.Contains(name, alias) {
+				return rank
+			}
+		}
+		if hasRegionCode(name, region.code) {
 			return rank
 		}
 	}
 	return len(nodeRegionPreferences)
 }
 
-func matchesNodeRegion(name string, region nodeRegionPreference) bool {
-	for _, alias := range region.aliases {
-		if strings.Contains(name, alias) {
-			return true
-		}
-	}
-	return hasRegionCode(name, region.code)
-}
-
 func hasRegionCode(name, code string) bool {
 	return strings.HasPrefix(name, code) || strings.Contains(name, " "+code) || strings.Contains(name, "-"+code) || strings.Contains(name, "_"+code)
 }
 
-func (m *Model) updateNodes(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if key, ok := msg.(tea.KeyMsg); ok {
-		if m.nodeList.SettingFilter() || (key.String() == "esc" && m.nodeList.FilterState() != list.Unfiltered) {
-			var cmd tea.Cmd
-			m.nodeList, cmd = m.nodeList.Update(msg)
-			return m, cmd
-		}
-
+func (m *Model) updateNodes(msg tea.Msg) tea.Cmd {
+	if key, ok := msg.(tea.KeyMsg); ok && !m.nodeList.SettingFilter() {
 		switch key.String() {
 		case "enter":
 			selected, ok := m.nodeList.SelectedItem().(nodeItem)
 			if !ok {
 				m.setStatus(statusWarning, "No runnable nodes")
-				return m, nil
+				return nil
 			}
-			cmd := m.requestStartNode(selected.node, "Stopping current service, then starting node: "+selected.node.Name)
-			return m, cmd
+			return m.requestStartNode(selected.node)
 		case "esc":
-			if m.returnToRunning() {
-				return m, nil
+			if m.nodeList.FilterState() == list.Unfiltered {
+				m.returnToRunning()
+				return nil
 			}
-			return m, nil
 		}
 	}
 
 	var cmd tea.Cmd
 	m.nodeList, cmd = m.nodeList.Update(msg)
-	return m, cmd
+	return cmd
 }
 
-func (m *Model) updateRunning(msg tea.Msg) (tea.Model, tea.Cmd) {
-	key, ok := msg.(tea.KeyMsg)
-	if !ok {
-		return m, nil
-	}
+func (m *Model) resizeNodeList() {
+	m.reserveNodePaginationHeight()
+	m.nodeList.SetSize(m.mainContentWidth(), m.nodeListHeight())
+}
 
-	switch key.String() {
-	case "s":
-		m.state = stateNodeList
-		m.clearStatus()
-		m.setModeHint("Choose a node, press ↵ to confirm switch, esc to cancel")
-		m.prepareNodeSelection()
-	case "right", "pgdown":
-		m.connections.nextPage()
-	case "left", "pgup":
-		m.connections.previousPage()
+func (m *Model) reserveNodePaginationHeight() {
+	if len(m.nodeList.VisibleItems()) > 1 && m.nodeList.Paginator.TotalPages < 2 {
+		m.nodeList.Paginator.TotalPages = 2
 	}
-	return m, nil
 }
 
 func (m *Model) prepareNodeSelection() {
-	m.nodeList = newNodeList(nodeItemsWithCurrent(m.nodes, m.currentNodeName()))
+	currentName := m.currentNodeName()
+	m.nodeList = newNodeList(m.nodes, currentName)
 	m.resizeNodeList()
-	if currentName := m.currentNodeName(); currentName != "" {
+	if currentName != "" {
 		if _, ok := m.selectNodeByName(currentName); ok {
 			return
 		}
@@ -170,4 +148,13 @@ func (m *Model) selectNodeByName(name string) (x365.Node, bool) {
 		}
 	}
 	return x365.Node{}, false
+}
+
+func (m *Model) returnToRunning() {
+	if m.service == nil {
+		return
+	}
+	m.state = stateRunning
+	m.clearModeHint()
+	m.setExpiringStatus(statusInfo, "Cancelled; current service keeps running", 2*time.Second)
 }

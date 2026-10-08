@@ -269,10 +269,6 @@ proxies:
 	}
 }
 
-// A template is zlib-compressed base64 today and was plain base64 YAML before, so
-// both must unpack and receive the UUID: a config that worked before an upgrade
-// has to keep working. Anything that is neither is reported rather than treated
-// as an empty node list, which would otherwise look like a config with no nodes.
 func TestParseConfigTextUnpacksProxyTemplateEncodings(t *testing.T) {
 	templateBody := `
 Hong Kong19:
@@ -349,14 +345,9 @@ func TestUnpackProxyTemplateRejectsOversizedData(t *testing.T) {
 	}
 }
 
-// Blank list entries are tolerated because hand-edited configs collect them, but
-// a group that holds nothing else is reported rather than silently contributing
-// no nodes. Both the direct proxies list and the unpacked template carry the same
-// policy, and each names its own field so the message points at the right one.
 func TestParseConfigTextSkipsBlankProxyURIs(t *testing.T) {
 	tests := []struct {
-		name string
-		// build renders a config whose single group holds urls verbatim.
+		name  string
 		build func(t *testing.T, urls string) string
 		// validURL is the node URL form that path accepts: the direct list carries
 		// the UUID, a template must omit it.
@@ -385,7 +376,6 @@ func TestParseConfigTextSkipsBlankProxyURIs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// A blank entry alongside a real one is skipped.
 			config, err := parseConfigText(tt.build(t, `  - ""
   - "   "
   - `+tt.validURL+"\n"))
@@ -396,7 +386,6 @@ func TestParseConfigTextSkipsBlankProxyURIs(t *testing.T) {
 				t.Fatalf("len(nodes)=%d, want 1", len(config.Nodes))
 			}
 
-			// A group of nothing but blanks is an error, not an empty node list.
 			_, err = parseConfigText(tt.build(t, `  - ""
   - "   "
 `))
@@ -512,9 +501,6 @@ func TestParseConfigTextRedactsProxyURLValidationErrors(t *testing.T) {
 	}
 }
 
-// Load wraps the parse error with the config path, so it is the path that reaches
-// the TUI. The redaction has to survive that wrapping: the file name is safe to
-// show, the node material inside the file is not.
 func TestLoadRejectsInvalidNodeUUID(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	text := `
@@ -611,8 +597,8 @@ proxies:
 	if len(configs) != 1 {
 		t.Fatalf("len(sniff configs)=%d, want 1", len(configs))
 	}
-	if configs[0].Method != "aes-256-gcm" || configs[0].Cipher != "" {
-		t.Fatalf("method=%q cipher=%q, want normalized method", configs[0].Method, configs[0].Cipher)
+	if configs[0].Method != "aes-256-gcm" {
+		t.Fatalf("method=%q, want normalized method", configs[0].Method)
 	}
 	if strings.Contains(nodes[0].Label(), "secret-password") {
 		t.Fatalf("node label leaks shadowsocks password: %s", nodes[0].Label())

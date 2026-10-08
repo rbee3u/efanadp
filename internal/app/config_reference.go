@@ -6,23 +6,21 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/rbee3u/efanadp/internal/config"
 )
 
 const (
 	configReferenceCommand = "config-reference"
-	configReferenceInput   = "config.yaml"
 	configReferenceOutput  = "config.reference.yaml"
 )
 
 func runConfigReferenceArgs(args []string, stdout io.Writer) error {
-	input := configReferenceInput
+	input := defaultConfigPath
 	output := configReferenceOutput
 	fs := flag.NewFlagSet(configReferenceCommand, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&input, "in", configReferenceInput, "private config file to read")
+	fs.StringVar(&input, "in", defaultConfigPath, "private config file to read")
 	fs.StringVar(&output, "out", configReferenceOutput, "reference config to write")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -48,7 +46,7 @@ func runConfigReference(input string, output string) error {
 	if err != nil {
 		return err
 	}
-	return writePrivateFileAtomically(output, reference)
+	return writePrivateFileAtomically(output, ".config-reference-*.tmp", reference)
 }
 
 func ensureDistinctConfigReferenceFiles(input, output string) error {
@@ -69,47 +67,17 @@ func ensureDistinctConfigReferenceFiles(input, output string) error {
 	return nil
 }
 
-func writePrivateFileAtomically(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".config-reference-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	committed := false
-	defer func() {
-		if !committed {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	committed = true
-	return nil
-}
-
 func printConfigReferenceHelp(w io.Writer) error {
-	_, err := fmt.Fprintf(
-		w,
-		"efanadp config-reference\n\nRegenerate the sanitized reference config.\n\nUsage:\n  efanadp config-reference [--in path] [--out path]\n\nFlags:\n      --in string    private config file to read (default %q)\n      --out string   reference config to write (default %q)\n",
-		configReferenceInput,
-		configReferenceOutput,
-	)
+	_, err := fmt.Fprintf(w, `efanadp config-reference
+
+Regenerate the sanitized reference config.
+
+Usage:
+  efanadp config-reference [--in path] [--out path]
+
+Flags:
+      --in string    private config file to read (default %q)
+      --out string   reference config to write (default %q)
+`, defaultConfigPath, configReferenceOutput)
 	return err
 }

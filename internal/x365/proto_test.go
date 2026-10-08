@@ -8,11 +8,8 @@ import (
 	"testing"
 )
 
-// These golden bytes are the reverse-engineered X365 request wire format, so they
-// are asserted literally rather than round-tripped: a round trip agrees with
-// itself even when both sides drift away from what the server accepts. The
-// address-type byte differs per host form (1 IPv4, 2 domain, 3 IPv6), and the
-// command byte selects the TCP or UDP path.
+// Golden bytes anchor the recovered wire format; a round trip could hide
+// matching encoder and decoder errors.
 func TestBuildX365Request(t *testing.T) {
 	const (
 		header = "58333635" + "01"
@@ -63,7 +60,7 @@ func TestBuildX365Request(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := buildX365RequestWithCommand(tt.host, tt.port, userID, tt.command)
+			got, err := buildX365Request(tt.host, tt.port, userID, tt.command)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -72,26 +69,8 @@ func TestBuildX365Request(t *testing.T) {
 			}
 		})
 	}
-
-	// buildX365Request is the TCP entry point every multipath open uses, so it has
-	// to agree with the command it claims to send.
-	t.Run("tcp helper matches explicit command", func(t *testing.T) {
-		viaHelper, err := buildX365Request("example.com", 53, userID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		explicit, err := buildX365RequestWithCommand("example.com", 53, userID, x365CommandTCP)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(viaHelper, explicit) {
-			t.Fatalf("buildX365Request=%x, want the TCP command request %x", viaHelper, explicit)
-		}
-	})
 }
 
-// An out-of-range port or an unknown command must fail before anything reaches
-// the wire, since a truncated or mislabeled request is what the server rejects.
 func TestBuildX365RequestRejectsBadInput(t *testing.T) {
 	userID, err := ParseUserID("00112233-4455-6677-8899-aabbccddeeff")
 	if err != nil {
@@ -110,7 +89,7 @@ func TestBuildX365RequestRejectsBadInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := buildX365RequestWithCommand("example.com", tt.port, userID, tt.command); err == nil {
+			if _, err := buildX365Request("example.com", tt.port, userID, tt.command); err == nil {
 				t.Fatal("request build succeeded, want error")
 			}
 		})
@@ -173,30 +152,6 @@ func TestFrameRoundTrip(t *testing.T) {
 	}
 	if parsed.Type != frameData || parsed.Seq != 0x0102030405060708 || !bytes.Equal(parsed.Payload, []byte{0x16, 0x03, 0x01}) {
 		t.Fatalf("bad frame: %+v", parsed)
-	}
-}
-
-func TestMultipathFramerSequence(t *testing.T) {
-	var streamID [16]byte
-	framer := &multipathFramer{StreamID: streamID}
-	first, err := framer.dataFrameHeader(3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := framer.dataFrameHeader(2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsedFirst, firstPayloadLen := parseFrameHeader(first[:])
-	parsedSecond, secondPayloadLen := parseFrameHeader(second[:])
-	if parsedFirst.Seq != 0 || firstPayloadLen != 3 || parsedSecond.Seq != 3 || secondPayloadLen != 2 {
-		t.Fatalf(
-			"bad sequence: first seq=%d len=%d second seq=%d len=%d",
-			parsedFirst.Seq,
-			firstPayloadLen,
-			parsedSecond.Seq,
-			secondPayloadLen,
-		)
 	}
 }
 
