@@ -1,5 +1,8 @@
 # Local X365 Adapter
 
+This context covers local SOCKS5 access through decrypted X365 nodes. Its terms
+distinguish the adapter from traffic orchestration and account management.
+
 ## Language
 
 **Local X365 Adapter**:
@@ -38,8 +41,8 @@ An X365 byte stream toward a remote target or control endpoint.
 _Avoid_: SOCKS connection
 
 **Target Chain**:
-The display label `outer->inner`, combining the SOCKS target with a sniffed inner
-target; it has no routing authority.
+A display label combining the SOCKS target with a sniffed inner target; it has
+no routing authority.
 
 **Connection Projection**:
 The current session's active connections, closed count, labels, and byte statistics.

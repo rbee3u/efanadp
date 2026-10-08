@@ -69,7 +69,7 @@ Follow package ownership in [architecture](docs/architecture.md#package-responsi
 Update the relevant document in the [index](docs/README.md) when behavior,
 config, protocol, or Make targets change. Keep the README to onboarding and links.
 
-Keep [CONTEXT.md](CONTEXT.md) to domain terms and `docs/adr/` to consequential
+Keep [GLOSSARY.md](GLOSSARY.md) to domain terms and `docs/adr/` to consequential
 trade-offs and their reasons. When replacing an accepted decision, link its
 successor and state what it supersedes.
 

@@ -9,7 +9,7 @@
 | Private material and sanitization | [privacy.md](privacy.md) |
 | Package ownership and relay lifecycle | [architecture.md](architecture.md) |
 | Protocol bytes and reverse findings | [x365-protocol.md](x365-protocol.md) |
-| Domain terms | [CONTEXT.md](../CONTEXT.md) |
+| Domain terms | [GLOSSARY.md](../GLOSSARY.md) |
 | Product and trust boundary | [ADR 0001](adr/0001-local-x365-adapter-boundary.md) |
 | Config and session lifecycle | [ADR 0002](adr/0002-config-and-session-lifecycle.md) |
 | Contributor and agent instructions | [AGENTS.md](../AGENTS.md) |
