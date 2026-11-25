@@ -37,8 +37,8 @@ func handshakeWithDeadline[T io.Closer](
 	timedOut := closingStarted && ctx.Err() == nil && errors.Is(deadlineCtx.Err(), context.DeadlineExceeded)
 	if closingStarted {
 		if err == nil {
-			// Even a successful handshake now wraps a closing stream. Release
-			// wrappers such as the multipath ACK goroutine before returning.
+			// Even a successful handshake now returns a stream that the
+			// timeout closer has already started closing.
 			closeQuietly(conn)
 		}
 		if timedOut {

@@ -9,11 +9,6 @@ import (
 	"strings"
 )
 
-const (
-	multipathControlHost = "multipath.internal"
-	multipathControlPort = 1
-)
-
 const x365RequestVersion byte = 1
 
 type x365Command byte

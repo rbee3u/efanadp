@@ -3,8 +3,6 @@ package x365
 import (
 	"bytes"
 	"encoding/hex"
-	"errors"
-	"fmt"
 	"testing"
 )
 
@@ -29,11 +27,11 @@ func TestBuildX365Request(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "tcp multipath control host",
-			host:    multipathControlHost,
-			port:    multipathControlPort,
+			name:    "tcp direct destination",
+			host:    "example.com",
+			port:    443,
 			command: x365CommandTCP,
-			want:    header + "01" + user + "0001" + "02" + "12" + "6d756c7469706174682e696e7465726e616c",
+			want:    header + "01" + user + "01bb" + "02" + "0b" + "6578616d706c652e636f6d",
 		},
 		{
 			name:    "udp domain",
@@ -120,62 +118,4 @@ func TestParseUserIDRejectsBadLengthAndHex(t *testing.T) {
 			t.Fatalf("ParseUserID(%q) succeeded, want error", uuidText)
 		}
 	}
-}
-
-func TestMultipathHelloRoundTrip(t *testing.T) {
-	var streamID [16]byte
-	copy(streamID[:], bytes.Repeat([]byte{0x11}, 16))
-	payload, err := buildMultipathHello("example.com", 443, streamID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hello, err := parseHelloForTest(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hello.Host != "example.com" || hello.Port != 443 {
-		t.Fatalf("bad hello: %+v", hello)
-	}
-}
-
-func TestFrameRoundTrip(t *testing.T) {
-	frameBytes, err := buildFrame(frameData, 0x0102030405060708, []byte{0x16, 0x03, 0x01})
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed, consumed, err := parseFrame(frameBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if consumed != len(frameBytes) {
-		t.Fatalf("consumed %d, want %d", consumed, len(frameBytes))
-	}
-	if parsed.Type != frameData || parsed.Seq != 0x0102030405060708 || !bytes.Equal(parsed.Payload, []byte{0x16, 0x03, 0x01}) {
-		t.Fatalf("bad frame: %+v", parsed)
-	}
-}
-
-type helloForTest struct {
-	StreamID [16]byte
-	Host     string
-	Port     int
-}
-
-func parseHelloForTest(payload []byte) (helloForTest, error) {
-	if len(payload) < 21 {
-		return helloForTest{}, fmt.Errorf("hello payload too short: %d", len(payload))
-	}
-	if payload[16] != 0 || payload[17] != 1 {
-		return helloForTest{}, fmt.Errorf("bad hello kind/flags: %d/%d", payload[16], payload[17])
-	}
-	hostLen := int(payload[20])
-	end := 21 + hostLen
-	if len(payload) != end {
-		return helloForTest{}, errors.New("bad hello host length")
-	}
-	var hello helloForTest
-	copy(hello.StreamID[:], payload[:16])
-	hello.Port = int(payload[18])<<8 | int(payload[19])
-	hello.Host = string(payload[21:end])
-	return hello, nil
 }

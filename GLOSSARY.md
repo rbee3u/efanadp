@@ -37,7 +37,7 @@ SOCKS Control Connection.
 _Avoid_: UDP stream
 
 **Upstream Stream**:
-An X365 byte stream toward a remote target or control endpoint.
+An X365 byte stream toward a remote target.
 _Avoid_: SOCKS connection
 
 **Target Chain**:

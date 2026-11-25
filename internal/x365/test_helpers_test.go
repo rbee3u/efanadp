@@ -1,49 +1,14 @@
 package x365
 
 import (
-	"errors"
+	"bytes"
 	"io"
+	"sync"
 	"testing"
 	"time"
 )
 
 const testWaitTimeout = time.Second
-
-type frame struct {
-	frameHeader
-	Payload []byte
-}
-
-func parseFrame(buf []byte) (frame, int, error) {
-	if len(buf) < frameHeaderSize {
-		return frame{}, 0, errors.New("need more data")
-	}
-	header := parseFrameHeader(buf[:frameHeaderSize])
-	total := frameHeaderSize + header.PayloadLen
-	if len(buf) < total {
-		return frame{}, 0, errors.New("need more data")
-	}
-	return frame{
-		frameHeader: header,
-		Payload:     append([]byte(nil), buf[frameHeaderSize:total]...),
-	}, total, nil
-}
-
-func readFrameForTest(r io.Reader) (frame, error) {
-	header, err := readFrameHeader(r)
-	if err != nil {
-		return frame{}, err
-	}
-	result := frame{frameHeader: header}
-	if header.PayloadLen > 0 {
-		payload := make([]byte, header.PayloadLen)
-		if _, err := io.ReadFull(r, payload); err != nil {
-			return frame{}, err
-		}
-		result.Payload = payload
-	}
-	return result, nil
-}
 
 func receiveWithin[T any](tb testing.TB, ch <-chan T, label string) T {
 	tb.Helper()
@@ -64,4 +29,94 @@ func requireNoReceive[T any](tb testing.TB, ch <-chan T, label string) {
 		tb.Fatalf("received %s: %v", label, value)
 	default:
 	}
+}
+
+type closeCountingTestStream interface {
+	io.ReadWriteCloser
+	closes() int
+}
+
+type memoryStream struct {
+	read       bytes.Buffer
+	write      bytes.Buffer
+	closeCount int
+}
+
+func (s *memoryStream) Read(p []byte) (int, error) {
+	return s.read.Read(p)
+}
+
+func (s *memoryStream) Write(p []byte) (int, error) {
+	return s.write.Write(p)
+}
+
+func (s *memoryStream) Close() error {
+	s.closeCount++
+	return nil
+}
+
+func (s *memoryStream) closes() int {
+	return s.closeCount
+}
+
+type failNthRecordingStream struct {
+	mu        sync.Mutex
+	written   bytes.Buffer
+	failOn    int
+	err       error
+	writes    int
+	closeOnce sync.Once
+}
+
+func (s *failNthRecordingStream) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (s *failNthRecordingStream) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.writes++
+	if s.writes == s.failOn {
+		return 0, s.err
+	}
+	return s.written.Write(p)
+}
+
+func (s *failNthRecordingStream) Close() error {
+	s.closeOnce.Do(func() {})
+	return nil
+}
+
+func (s *failNthRecordingStream) bytes() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return bytes.Clone(s.written.Bytes())
+}
+
+func (s *failNthRecordingStream) writeCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writes
+}
+
+type writeErrorStream struct {
+	err        error
+	closeCount int
+}
+
+func (s *writeErrorStream) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (s *writeErrorStream) Write([]byte) (int, error) {
+	return 0, s.err
+}
+
+func (s *writeErrorStream) Close() error {
+	s.closeCount++
+	return nil
+}
+
+func (s *writeErrorStream) closes() int {
+	return s.closeCount
 }

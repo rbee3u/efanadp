@@ -14,7 +14,7 @@ replacement and configuration lifetime.
 | `internal/tui` | Node selection/switching, connection projection, terminal interaction |
 | `internal/session` | Offline preparation, service cancellation/completion, event delivery |
 | `internal/proxy` | SOCKS5 lifecycle, TCP/UDP relay, target cache, connection accounting |
-| `internal/x365` | Node URI, protocol frames, multipath TCP, direct UDP, xhttp + REALITY |
+| `internal/x365` | Node URI, protocol header, direct TCP and UDP, xhttp + REALITY |
 | `internal/sniff` | Display-only Shadowsocks target inspection |
 | `internal/datagram` | Message-oriented I/O contract |
 | `internal/human` | Shared display formatting |
@@ -61,11 +61,10 @@ exponential backoff from 5 ms to 1 s; other accept errors stop the service.
 
 ## TCP Relay
 
-A CONNECT uses the [X365 multipath TCP path](x365-protocol.md#tcp-path).
-
-ACKs must not block reads behind a flow-controlled upload; see
-[`ackQueue`](../internal/x365/multipath_ack.go). Graceful close has a bounded
-wait before closing the stream to release stalled writes.
+A CONNECT uses the [X365 direct TCP path](x365-protocol.md#tcp-path). One request
+names the SOCKS target, the adapter consumes the five-byte server status, and
+then relays raw bytes. There is no inner framing, ACK, or close record; closing
+the upstream stream ends the flow.
 
 ## UDP Relay
 

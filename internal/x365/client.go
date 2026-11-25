@@ -1,4 +1,4 @@
-// Package x365 implements multipath TCP and direct UDP over xhttp + REALITY.
+// Package x365 implements direct TCP and UDP over xhttp + REALITY.
 // Protocol changes require APK evidence recorded in docs/x365-protocol.md.
 package x365
 
@@ -32,7 +32,7 @@ func NewClient(node Node, timeout time.Duration) (*Client, error) {
 	}, nil
 }
 
-// OpenTCP opens a multipath stream to the destination. The caller owns the
+// OpenTCP opens a direct stream to the destination. The caller owns the
 // returned stream and must Close it. Canceling ctx also ends its transport.
 func (c *Client) OpenTCP(ctx context.Context, destHost string, destPort int) (io.ReadWriteCloser, error) {
 	stream, err := openXHTTPRealityStream(ctx, c.node, c.timeout)
@@ -40,10 +40,10 @@ func (c *Client) OpenTCP(ctx context.Context, destHost string, destPort int) (io
 		return nil, fmt.Errorf("open xhttp reality stream: %w", err)
 	}
 	conn, err := handshakeWithDeadline(ctx, c.timeout, stream, func() (io.ReadWriteCloser, error) {
-		return openMultipath(stream, c.userID, destHost, destPort)
+		return openTCP(stream, c.userID, destHost, destPort)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open multipath stream: %w", err)
+		return nil, fmt.Errorf("open x365 stream: %w", err)
 	}
 	return conn, nil
 }

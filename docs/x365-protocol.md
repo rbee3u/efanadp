@@ -1,14 +1,22 @@
 # X365 Protocol Reference
 
-Adapter-side reference from sanitized efanrev findings, with a baseline confirmed
-across efanapp `1-0-27` and `1-0-28`. Change protocol claims only with fresh APK
-evidence; keep operational workarounds in [troubleshooting](troubleshooting.md).
+Adapter-side reference from sanitized efanrev findings. The current shape follows
+efanapp `1-0-71`: the X365 header names the real destination and TCP has no inner
+framing. Change protocol claims only with fresh APK evidence; keep operational
+workarounds in [troubleshooting](troubleshooting.md).
+
+## Protocol Generations
+
+Through `1-0-64`, the app opened `multipath.internal:1` and carried TCP inside a
+13-byte-framed multipath layer whose hello named the real target. `1-0-71` removed
+that layer. efanadp implements the `1-0-71` shape only; the older multipath
+framing is no longer part of the adapter.
 
 ## Node URI
 
 See [configuration](configuration.md#node-uri-fields) for URI fields. UUIDs decode
-to 16 request bytes. URI parsing requires `sni`; only programmatic nodes can
-fall back to `host` for the REALITY server name.
+to 16 request bytes. URI parsing requires `sni`; only programmatic nodes can fall
+back to `host` for the REALITY server name.
 
 ## Outer Transport
 
@@ -54,70 +62,39 @@ Domain: 0x02 len[1] name[len]
 IPv6:   0x03 addr[16]
 ```
 
+For TCP the destination is the real target, so a domain request is exactly
+`26 + len(domain)` bytes before payload. A sanitized `example.com:443` request:
+
+```text
+58333635 01 01 00112233445566778899aabbccddeeff 01bb 02 0b "example.com"
+```
+
 The server acknowledges successful setup with:
 
 ```text
 "X365" 0x00
 ```
 
-Any other magic or non-zero status is rejected.
+This five-byte response precedes any target data. Any other magic or non-zero
+status is rejected.
 
 ## TCP Path
 
-TCP uses a multipath control stream; the hello frame carries the final target.
-
-Open sequence:
+TCP uses the direct X365 command path:
 
 1. Open the xhttp + REALITY stream.
-2. Send an X365 request with command `0x01` to `multipath.internal:1`.
+2. Send a command `0x01` request naming the real target host and port.
 3. Read the 5-byte `X365 0x00` response.
-4. Generate a random 16-byte multipath stream ID.
-5. Send a multipath hello frame naming the real target host and port.
-6. Relay application bytes through multipath data frames.
+4. Relay raw bytes in both directions.
 
-Multipath frame header:
-
-```text
-offset  size  field
-0       1     frame type
-1       8     sequence number, big endian
-9       1     reserved, observed 0x00
-10      3     payload length, big endian uint24
-13      var   payload
-```
-
-Known frame types:
-
-```text
-0x00 hello/control
-0x01 data
-0x03 close
-0x05 ACK
-```
-
-Hello payload for opening the real target:
-
-```text
-offset  size  field
-0       16    random multipath stream ID
-16      1     kind, observed 0x00
-17      1     flags, observed 0x01
-18      2     real target port, big endian
-20      1     real target host length
-21      var   real target host bytes
-```
-
-Data frames use type `0x01`. The client-side write sequence starts at `0` and
-advances by the payload length after each data frame. On inbound data frames,
-the adapter ACKs `frame.seq + len(frame.payload)` with a type `0x05` frame.
-
-Close uses type `0x03` with the current write sequence and no payload. The adapter
-discards inbound ACK, hello, and unknown frames; it implements no multipath
-retransmission or send window.
+There is no inner hello, frame, ACK, or close record. The adapter consumes the
+acknowledgement before returning the stream, so the first relayed response byte
+is target data. Closing the stream ends the flow.
 
 ## UDP Path
 
-UDP uses a direct X365 command path rather than the multipath TCP path.
+UDP uses a direct X365 command path. The `1-0-71` comparison found the UDP wrapper
+unchanged; efanadp keeps the established direct path.
 
 Open sequence for one UDP destination:
 
@@ -149,7 +126,8 @@ Current adapter policy:
 
 ## Local SOCKS Mapping
 
-For TCP `CONNECT`, efanadp maps the SOCKS target to the multipath hello target.
+For TCP `CONNECT`, efanadp writes the SOCKS target directly into the X365
+request.
 
 For UDP `UDP_ASSOCIATE`, efanadp parses the standard SOCKS5 UDP envelope:
 
