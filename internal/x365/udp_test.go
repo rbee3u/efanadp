@@ -99,6 +99,8 @@ func TestClientOpenUDPWrapsTransportError(t *testing.T) {
 	}
 }
 
+// 1.0.71 only opens payload-free command-0x02 probes, so the datagram prefix has
+// no 1.0.71 wire capture; it remains the only way to delimit datagrams.
 func TestX365UDPConnFramesWrites(t *testing.T) {
 	stream := &memoryStream{}
 	conn := &x365UDPConn{stream: stream}

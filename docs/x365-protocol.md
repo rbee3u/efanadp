@@ -49,7 +49,7 @@ offset  size  field
 0       4     ASCII "X365"
 4       1     version, always 0x01
 5       1     command: 0x01 TCP-ish, 0x02 UDP-ish
-6       16    user UUID material
+6       16    request identifier (account UUID for tunneled traffic)
 22      2     destination port, big endian
 24      var   typed destination address
 ```
@@ -61,6 +61,11 @@ IPv4:   0x01 addr[4]
 Domain: 0x02 len[1] name[len]
 IPv6:   0x03 addr[16]
 ```
+
+`1-0-71` chooses this 16-byte value by connection kind: a bootstrap identifier
+for its version, config, and connectivity calls, and the account UUID from
+`access_token` for every tunneled connection and datagram. efanadp only makes
+tunneled requests, so it uses the node URI UUID for TCP and UDP.
 
 For TCP the destination is the real target, so a domain request is exactly
 `26 + len(domain)` bytes before payload. A sanitized `example.com:443` request:
@@ -93,8 +98,11 @@ is target data. Closing the stream ends the flow.
 
 ## UDP Path
 
-UDP uses a direct X365 command path. The `1-0-71` comparison found the UDP wrapper
-unchanged; efanadp keeps the established direct path.
+UDP uses a direct X365 command path. `1-0-71` still emits command `0x02`, but
+only for payload-free public-DNS reachability probes; the app never sends a
+datagram payload in that build. The `uint16_be` prefix is therefore not exercised
+by 1.0.71, but it is the only boundary a byte stream carrying datagrams can use,
+so efanadp retains it. The adapter's relay is what actually sends payloads.
 
 Open sequence for one UDP destination:
 
@@ -120,9 +128,10 @@ Current adapter policy:
 - SOCKS5 `UDP_ASSOCIATE` opens one cached direct X365 UDP stream per destination
   host/port inside an association.
 - SOCKS5 UDP fragments (`FRAG != 0`) are rejected; no reassembly is implemented.
-- UDP/443 is dropped. Static analysis found the app deliberately avoids X365
-  UDP/443 for QUIC and falls back to TCP, so forwarding UDP/443 through this
-  path is disabled until a future APK proves otherwise.
+- UDP/443 is dropped. Earlier releases deliberately avoided X365 UDP/443 for
+  QUIC; 1.0.71 only showed payload-free datagram probes, so there is still no
+  fresh evidence that X365 forwards QUIC. Forwarding stays disabled until an APK
+  observation proves it.
 
 ## Local SOCKS Mapping
 

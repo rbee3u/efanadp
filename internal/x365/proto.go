@@ -18,7 +18,9 @@ const (
 	x365CommandUDP x365Command = 2
 )
 
-// UserID is the private 16-byte account value carried in X365 requests.
+// UserID is the private 16-byte account identifier carried on tunneled X365
+// requests. 1.0.71 uses a separate bootstrap identifier for its own version,
+// config, and probe calls, which this adapter does not make.
 type UserID [16]byte
 
 // ParseUserID decodes dashed or undashed hexadecimal UUID text.

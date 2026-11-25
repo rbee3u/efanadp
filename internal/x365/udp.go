@@ -97,6 +97,10 @@ func readX365UDPDatagram(r io.Reader, p []byte) (int, error) {
 	return n, nil
 }
 
+// writeX365UDPDatagram prepends the only datagram boundary on the byte stream.
+// 1.0.71 opens command-0x02 channels only as payload-free reachability probes,
+// so its captures cannot confirm this prefix; retaining it is required to
+// delimit actual datagrams.
 func writeX365UDPDatagram(w io.Writer, p []byte) (int, error) {
 	payloadLen := len(p)
 	if payloadLen > x365UDPMaxPayload {

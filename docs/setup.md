@@ -54,8 +54,9 @@ rules:
 
 Replace `example.net` with the node-server domain suffix and `example.org` with
 the adapter-bound condition. Keep the process bypass and scoped UDP/443 reject
-before the proxy rule: the first prevents loops, the second avoids the
-unsupported QUIC path. A global UDP/443 reject would disable unrelated QUIC.
+before the proxy rule: the first prevents loops, the second keeps UDP/443 off the
+X365 path, where QUIC forwarding is unproven. A global UDP/443 reject would
+disable unrelated QUIC.
 
 ## TUI Controls
 

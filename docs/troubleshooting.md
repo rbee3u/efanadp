@@ -20,9 +20,10 @@ bypass mihomo's DNS handling and affect domain matching in TUN + fake-IP setups.
 
 ## UDP/443, QUIC, and Secure DNS Stall
 
-UDP/443 is dropped because the observed APK avoids the X365 UDP path for QUIC.
-Use the [scoped reject rule](setup.md#mihomo-setup) before the matching adapter
-rule. Rejecting all UDP/443 would affect unrelated traffic.
+UDP/443 is dropped because X365 QUIC forwarding is unproven: the APK
+observations have not shown a real datagram payload on that path. Use the
+[scoped reject rule](setup.md#mihomo-setup) before the matching adapter rule.
+Rejecting all UDP/443 would affect unrelated traffic.
 
 ## Adapter Traffic Loops Through mihomo
 
